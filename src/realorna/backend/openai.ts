@@ -3,7 +3,7 @@ import { SYSTEM_PROMPT } from "./prompt";
 import { hasOpenAIKeys, withOpenAIKey } from "./key-pool";
 import { evidenceUrl, parseModelJson } from "./contract";
 import type { Plan, Source } from "../types";
-import { modelForContent, type ContentType } from "./models";
+import { GPT_6_2_SOL, modelForContent, type ContentType } from "./models";
 import type { VisualInput } from "./media";
 import { AiServiceError, providerDiagnostic, type AiDiagnostic } from "./ai-errors";
 
@@ -67,8 +67,15 @@ export function extractResponse(data: ResponseData, diagnostic: AiDiagnostic = {
 }
 
 export async function askOpenAI(user: string, plan: Plan, deadline = Date.now() + 100_000, media?: { type: ContentType; images: VisualInput[] }) {
-  const model = modelForContent(media?.type || "article");
-  if (media?.type === "media" && plan !== "advance") throw new AiServiceError("ai_unavailable", { origin: "configuration", reason: "media_plan" });
+  const contentType = media?.type || "article";
+  const model = modelForContent(contentType);
+  if (contentType !== "article" && plan !== "advance") {
+    throw new AiServiceError("ai_unavailable", { origin: "configuration", reason: "media_plan" });
+  }
+  const usesSol = model === GPT_6_2_SOL || model.startsWith(`${GPT_6_2_SOL}-`);
+  const reasoning = usesSol && contentType !== "media"
+    ? { effort: contentType === "video" ? "high" : "medium" }
+    : undefined;
   const content: unknown[] = [{ type: "input_text", text: user }];
   for (const image of media?.images || []) {
     content.push({ type: "input_text", text: image.label }, { type: "input_image", image_url: `data:image/jpeg;base64,${Buffer.from(image.bytes).toString("base64")}`, detail: "high" });
@@ -79,7 +86,7 @@ export async function askOpenAI(user: string, plan: Plan, deadline = Date.now() 
   const response = await withOpenAIKey((key, signal, requestId) => fetch("https://api.openai.com/v1/responses", {
     method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}`, "X-Client-Request-Id": requestId },
     body: JSON.stringify({
-      model, store: false, instructions: SYSTEM_PROMPT, input: media ? [{ role: "user", content }] : user,
+      model, reasoning, store: false, instructions: SYSTEM_PROMPT, input: media ? [{ role: "user", content }] : user,
       tools: [{ type: "web_search", search_context_size: "medium" }], tool_choice: "required",
       max_tool_calls: 6, include: ["web_search_call.action.sources"], max_output_tokens: 7000,
       text: { format: { type: "json_schema", name: "realorna_fact_check", strict: true, schema } },
