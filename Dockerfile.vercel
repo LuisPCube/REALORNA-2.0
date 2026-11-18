@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1
+# Vercel Container Runtime: includes the actual media tools in production.
+FROM node:24-bookworm-slim AS build
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund
+COPY . .
+RUN npm run build:container
+
+FROM node:24-bookworm-slim AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv ffmpeg ca-certificates tini \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY media/requirements.txt /app/media/requirements.txt
+RUN python3 -m venv /opt/media-venv \
+    && /opt/media-venv/bin/pip install --no-cache-dir -r /app/media/requirements.txt
+COPY --from=build /app/.output ./.output
+# Migrator and admin provisioning run with runtime credentials, never build args.
+COPY --from=build /app/package.json /app/package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund && npm cache clean --force
+COPY scripts ./scripts
+COPY migrations ./migrations
+COPY media ./media
+ENV NODE_ENV=production HOST=0.0.0.0 PORT=80 MEDIA_PYTHON=/opt/media-venv/bin/python3
+RUN /opt/media-venv/bin/python3 /app/media/media_job.py <<EOF_HEALTH
+{"action":"health"}
+EOF_HEALTH
+EXPOSE 80
+ENTRYPOINT ["tini", "--"]
+CMD ["node", "scripts/container-start.mjs"]

@@ -1,0 +1,13 @@
+node_modules
+.output
+.vercel
+.git
+.env
+.env.*
+*.log
+__pycache__
+.pglite
+screenshots
+artifacts
+.media-venv
+verification
