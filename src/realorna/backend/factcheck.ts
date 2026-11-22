@@ -256,7 +256,7 @@ export async function retryCheck(orderId: string) {
     const stored = readStored(current);
     return { order: current, result: stored.result, report: stored.report };
   }
-  if (!["paid", "failed", "processing"].includes(current.status) || !["credit", "admin"].includes(current.payment_method)) {
+  if (!["queued", "failed", "processing"].includes(current.status)) {
     throw new CheckError("invalid");
   }
   const wait = current.retry_after_at ? Math.ceil((new Date(current.retry_after_at).getTime() - Date.now()) / 1000) : 0;

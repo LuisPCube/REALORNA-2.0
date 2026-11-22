@@ -1,18 +1,19 @@
-# Realorna — media update, 8 November 2026
+# Realorna media deployment
 
-This is the complete application source. Extract the ZIP, replace the files in the existing repository, and redeploy the existing Vercel project. Keep its database and authentication secret. Do not upload only the HTML preview.
+Apply the included Git patch to the existing repository, or use the complete source in the `realorna` folder for a fresh checkout. Keep the existing database and authentication secret when deploying through Vercel.
 
 ## Vercel settings
 
 1. Set **Root Directory** to the folder containing `package.json` and `Dockerfile.vercel` (the `realorna` folder in this ZIP).
 2. Use **Container** as the framework/runtime. `Dockerfile.vercel` and `vercel.json` select it. Clear old custom npm build/output overrides if they prevent Container detection. The Dockerfile builds the app and installs Python, yt-dlp with EJS, gallery-dl, Node and FFmpeg/ffprobe.
 3. Allow a **300-second function duration** in the project's Functions settings. Media checks have a 270-second application deadline; media download/preparation has its own 100-second budget. Very slow media still fails with a free saved retry.
-4. Keep existing `DATABASE_URL`, `BETTER_AUTH_URL`, `BETTER_AUTH_SECRET`, admin and bank variables. The startup process applies pending SQL migrations with a database lock; existing accounts, attempts, payments and reports are retained. Never change the existing auth secret just to update this version.
+4. Keep existing `DATABASE_URL`, `BETTER_AUTH_URL`, `BETTER_AUTH_SECRET`, and any admin variables. Startup applies pending SQL migrations and preserves existing accounts, attempts, and reports.
 5. Configure the following server-side OpenAI variables for Production and, separately, Preview if used:
 
 ```text
 OPENAI_API_KEY=<your existing OpenAI API key>
-OPENAI_TEXT_MODEL=gpt-6-luna
+OPENAI_TEXT_MODEL=gpt-6.2-sol
+OPENAI_VIDEO_MODEL=gpt-6.2-sol
 OPENAI_MEDIA_MODEL=gpt-6.1-terra
 OPENAI_TRANSCRIBE_MODEL=gpt-transcribe
 ```
@@ -27,10 +28,10 @@ Official deployment reference: https://vercel.com/docs/functions/runtimes/contai
 
 | Input | Model / processing |
 | --- | --- |
-| Readable news/article, Regular or Advance | GPT-6 LUNA + mandatory web search |
+| Readable news/article, Regular or Advance | GPT-6.2 Sol at medium effort + mandatory web search |
 | Public video | yt-dlp download, local FFmpeg audio extraction and automatic frame selection |
 | Speech in downloaded audio | GPT Transcribe |
-| Video frames + transcript + caption | GPT-6.1 Terra + mandatory web search |
+| Video frames + transcript + caption | GPT-6.2 Sol at high effort + mandatory web search |
 | Instagram `/p/` carousel / supported image collection | gallery-dl retrieves every item, caption and order; Terra reads every image and verifies claims using web search |
 | X/Twitter post | gallery-dl collection extraction; a complete GraphQL fallback is available. Incomplete syndication data is rejected |
 | Result | Real, Nah, minor correction, or insufficient evidence; per-claim explanation and evidence links |
@@ -53,10 +54,10 @@ The UI polls the owned order for actual server stages: reading, downloading, pre
 
 Download/preparation uses one shared database lease. ASR and verification share the existing OpenAI request gate across users and instances. Provider Retry-After and quota/busy distinctions remain intact. A timed-out OpenAI POST is not silently repeated. Transient safe retries are bounded.
 
-Failures keep their original order, URL, plan and consumed attempt. **Coba lagi gratis / Retry for free** reruns that saved check and does not consume another customer attempt. It may still incur another provider charge and repeat the download/transcription. Do not create a different paid check to retry a failure.
+Failures keep their original check ID, URL, plan, and consumed attempt. **Coba lagi gratis / Retry for free** reruns that saved check using the same attempt. The provider may charge again for transcription and analysis.
 
 ## Testing and rollout
 
-Read `VERIFICATION.md` for the exact tested and untested parts. Local fixture tests cover actual FFmpeg preparation, actual yt-dlp native downloads/merging with simulated network responses, carousel completeness, model payloads, failure behavior and payments. No live OpenAI key or hosted Vercel database was used. Public platform probes failed DNS resolution in this environment, so successful live extraction from those services is **not established**. The Docker image itself was not built here because Docker is unavailable.
+`VERIFICATION.md` records previous test runs. The local test commands are listed in `SETUP.md`.
 
 Before selling media checks, deploy a Preview and run one accessible public video per intended platform and a multi-slide post using your own configured API project. Confirm audio, visible claims, dated evidence and the reported coverage. Treat this as a release acceptance check, not something already completed in this ZIP.

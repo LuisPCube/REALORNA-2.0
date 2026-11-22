@@ -39,7 +39,7 @@ function Login() {
     <header className="top"><a className="brand brand-name" href="/">Realorna</a><a className="account-link" href="/"><ArrowLeft size={16}/>{say(lang, "Back to checker", "Kembali")}</a></header>
     <main className="auth-layout"><div className="auth-story"><span className="eyebrow">REALORNA ACCOUNT</span>
       <h1>{say(lang, "A little clarity.\nOne account.", "Lebih jelas.\nSatu akun.")}</h1>
-      <p>{say(lang, "Your check attempts, transfers and reports, in one place.", "Kesempatan cek, transfer, dan laporanmu dalam satu tempat.")}</p>
+      <p>{say(lang, "Access your check attempts and reports.", "Akses kesempatan cek dan laporanmu.")}</p>
       <p className="auth-assurance"><ShieldCheck size={22}/>{say(lang, "Your attempts belong to your account.", "Kesempatan cek terikat pada akunmu.")}</p>
     </div><section className="account-card auth-card">
       <h2>{say(lang, register ? "Create your account" : "Welcome back", register ? "Buat akunmu" : "Selamat datang kembali")}</h2>

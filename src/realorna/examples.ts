@@ -1,7 +1,7 @@
 import type { FactOk, Lang } from "./types";
 
 export type ExampleKind = "real" | "nah" | "correction";
-/** Illustrations only. No live market data, invented citations, payment or API call. */
+/** Illustrations only. No live market data, invented citations, or API call. */
 export function exampleReport(kind: ExampleKind, lang: Lang): FactOk {
   const id = lang === "id";
   const point = (text: string, status: "benar" | "salah" | "keliru", explanation: string, correction = "", importance: "utama" | "detail" = "utama") =>

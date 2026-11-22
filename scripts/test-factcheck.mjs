@@ -7,7 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 if (process.env.DATABASE_URL?.trim() || process.env.VERCEL) throw new Error("Run fact-check tests without DATABASE_URL or VERCEL.");
 process.env.OPENAI_API_KEYS = "fixture-key"; delete process.env.OPENAI_API_KEY;
 process.env.OPENAI_MODEL = "fixture-model"; process.env.OPENAI_TRANSCRIBE_MODEL = "fixture-transcribe";
-delete process.env.OPENAI_TEXT_MODEL; delete process.env.OPENAI_MEDIA_MODEL; delete process.env.OPENAI_REGULAR_MODEL; delete process.env.OPENAI_ADVANCE_MODEL;
+delete process.env.OPENAI_TEXT_MODEL; delete process.env.OPENAI_MEDIA_MODEL; delete process.env.OPENAI_VIDEO_MODEL; delete process.env.OPENAI_REGULAR_MODEL; delete process.env.OPENAI_ADVANCE_MODEL;
 process.env.OPENAI_MIN_INTERVAL_MS = "1000"; process.env.OPENAI_MAX_QUEUE_WAIT_MS = "2000";
 const { createServer } = await import("vite");
 // In-process modules only; this is not a user preview or a live API test.
@@ -41,30 +41,35 @@ try {
     globalThis.fetch = async () => { throw new Error("Unexpected external fetch in fixture test"); };
     await fn(); checks++; console.log("PASS " + name);
   }
-  await test("Both article plans use LUNA; media uses Terra, ignoring legacy SOL", async () => {
-    assert.equal(models.modelForPlan("regular"), "gpt-6-luna");
-    assert.equal(models.modelForPlan("advance"), "gpt-6-luna");
+  await test("Both article plans send GPT-6.2 Sol with medium effort", async () => {
+    assert.equal(models.modelForPlan("regular"), "gpt-6.2-sol");
+    assert.equal(models.modelForPlan("advance"), "gpt-6.2-sol");
     assert.equal(models.modelForContent("media"), "gpt-6.1-terra");
     assert.throws(() => models.modelForPlan("unknown"), error => error.code === "ai_unavailable");
     const sent = [];
     globalThis.fetch = async (_url, options) => {
       const body = JSON.parse(options.body); sent.push(body.model);
+      assert.equal(body.reasoning.effort, "medium");
       assert.equal(body.tool_choice, "required"); assert.equal(body.text.format.strict, true);
       return new Response(JSON.stringify(responseData(fixture([claim("Fixture", "benar")]))));
     };
     for (const plan of ["regular", "advance"]) await ai.askOpenAI("Synthetic fixture", plan);
-    assert.deepEqual(sent, ["gpt-6-luna", "gpt-6-luna"]);
+    assert.deepEqual(sent, ["gpt-6.2-sol", "gpt-6.2-sol"]);
   });
-  await test("Plan-specific configuration is isolated and blank values retain the requested defaults", () => {
+  await test("Model overrides are isolated by content and blank values use the defaults", () => {
     process.env.OPENAI_REGULAR_MODEL = "  fixture-regular  "; process.env.OPENAI_ADVANCE_MODEL = "fixture-advance";
+    process.env.OPENAI_VIDEO_MODEL = "  fixture-video  ";
     try {
       assert.equal(models.modelForPlan("regular"), "fixture-regular");
       assert.equal(models.modelForPlan("advance"), "fixture-regular");
       assert.equal(models.modelForContent("media"), "gpt-6.1-terra");
+      assert.equal(models.modelForContent("video"), "fixture-video");
       process.env.OPENAI_REGULAR_MODEL = " "; process.env.OPENAI_ADVANCE_MODEL = " ";
-      assert.equal(models.modelForPlan("regular"), "gpt-6-luna"); assert.equal(models.modelForPlan("advance"), "gpt-6-luna");
-    assert.equal(models.modelForContent("media"), "gpt-6.1-terra");
-    } finally { delete process.env.OPENAI_REGULAR_MODEL; delete process.env.OPENAI_ADVANCE_MODEL; }
+      process.env.OPENAI_VIDEO_MODEL = " ";
+      assert.equal(models.modelForPlan("regular"), "gpt-6.2-sol"); assert.equal(models.modelForPlan("advance"), "gpt-6.2-sol");
+      assert.equal(models.modelForContent("media"), "gpt-6.1-terra");
+      assert.equal(models.modelForContent("video"), "gpt-6.2-sol");
+    } finally { delete process.env.OPENAI_REGULAR_MODEL; delete process.env.OPENAI_ADVANCE_MODEL; delete process.env.OPENAI_VIDEO_MODEL; }
   });
   await test("Correct event plus false core number yields Nah even if the model requests FAKTA", () => {
     const data = normalize(fixture([claim("IHSG turun", "benar"), claim("IHSG = 3500", "salah", { correction: "IHSG = 4900 pada sesi simulasi" })]));

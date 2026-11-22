@@ -1,21 +1,18 @@
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
-// Integration tests always use an isolated in-memory Postgres. Never test
-// payments or account creation against a configured real database.
+// Integration tests always use an isolated in-memory Postgres.
 if (process.env.DATABASE_URL?.trim() || process.env.VERCEL) throw new Error("Run this test without DATABASE_URL or VERCEL.");
 process.env.VITE_AUTH_ENABLED = "true";
 process.env.ADMIN_USERNAME = "realorna_admin";
 process.env.ADMIN_PASSWORD = randomBytes(24).toString("base64url");
 process.env.BETTER_AUTH_SECRET = randomBytes(32).toString("hex");
 process.env.BETTER_AUTH_URL = "http://localhost:8090";
-process.env.TRANSFER_BANK_NAME = "Test bank";
-process.env.TRANSFER_ACCOUNT_NUMBER = "0000000000";
-process.env.TRANSFER_ACCOUNT_HOLDER = "TEST ONLY";
 process.env.OPENAI_MIN_INTERVAL_MS = "1000";
 process.env.OPENAI_RETRY_BASE_MS = "250";
 process.env.OPENAI_MAX_QUEUE_WAIT_MS = "2000";
 delete process.env.OPENAI_API_KEYS; delete process.env.OPENAI_API_KEY; delete process.env.XAI_API_KEY;
 delete process.env.OPENAI_REGULAR_MODEL; delete process.env.OPENAI_ADVANCE_MODEL;
+delete process.env.OPENAI_TEXT_MODEL;
 const { createServer } = await import("vite");
 const server = await createServer({ server: { host: "127.0.0.1", port: 8090, strictPort: true }, logLevel: "error" });
 await server.listen();
@@ -26,11 +23,12 @@ async function request(path, body, token, extraHeaders = {}) {
   const response = await originalFetch(base + path, { method: body === undefined ? "GET" : "POST", headers: {
     "content-type": "application/json", origin: base, ...(token ? { Authorization: `Bearer ${token}` } : {}), ...extraHeaders,
   }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-  return { status: response.status, data: await response.json(), retryAfter: response.headers.get("Retry-After") };
+  const data = response.headers.get("Content-Type")?.includes("application/json") ? await response.json() : null;
+  return { status: response.status, data, retryAfter: response.headers.get("Retry-After") };
 }
 async function test(name, fn) { await fn(); checks.push(name); console.log(`PASS ${name}`); }
 const input = { url: "https://example.com/article", plan: "regular", lang: "en" };
-let admin, alex, other, grant, checkedOrder, invoice;
+let admin, alex, other, grant, checkedOrder;
 try {
   const db = await server.ssrLoadModule("/src/lib/db.ts");
   const sql = await db.getSql();
@@ -57,13 +55,12 @@ try {
     assert.equal(results.filter(r => r.status === 200).length, 1);
     const [{ count }] = await sql.query(`select count(*) as count from "user" where lower(username) = 'race'`); assert.equal(count, 1);
   });
-  await test("Anonymous and non-admin callers cannot grant attempts or bypass payment", async () => {
+  await test("Only admins can grant attempts and signed-in users need an attempt for the selected plan", async () => {
     assert.equal((await request("/api/admin")).status, 401);
     assert.equal((await request("/api/admin", { action: "grant", username: "alex", plan: "advance", request_key: randomUUID() }, alex)).status, 403);
     assert.equal((await request("/api/checks", { ...input, request_key: randomUUID() })).status, 401);
-    assert.equal((await request("/api/checks", { ...input, request_key: randomUUID() }, alex)).status, 402);
-    assert.equal((await request("/api/demo-payment", {}, alex)).status, 410);
-    assert.equal((await request("/api/midtrans-webhook", {})).status, 410);
+    const missing = await request("/api/checks", { ...input, request_key: randomUUID() }, alex);
+    assert.equal(missing.status, 403); assert.equal(missing.data.error, "attempt_required");
     assert.equal((await request("/api/admin", { action: "grant", username: "alex", plan: "regular", request_key: randomUUID() }, admin, { origin: "https://evil.example", "sec-fetch-site": "cross-site" })).status, 403);
   });
   await test("Admin grants are case insensitive, idempotent and account-bound", async () => {
@@ -71,8 +68,8 @@ try {
     const response = await request("/api/admin", body, admin); assert.equal(response.status, 200, JSON.stringify(response.data)); grant = response.data;
     const repeat = await request("/api/admin", body, admin); assert.equal(repeat.data.attempt_id, grant.attempt_id);
     assert.equal((await request("/api/account", undefined, alex)).data.attempts.length, 1);
-    assert.equal((await request("/api/checks", { ...input, attempt_id: grant.attempt_id, request_key: randomUUID() }, other)).status, 402);
-    assert.equal((await request("/api/checks", { ...input, plan: "advance", attempt_id: grant.attempt_id, request_key: randomUUID() }, alex)).status, 402);
+    assert.equal((await request("/api/checks", { ...input, attempt_id: grant.attempt_id, request_key: randomUUID() }, other)).status, 403);
+    assert.equal((await request("/api/checks", { ...input, plan: "advance", attempt_id: grant.attempt_id, request_key: randomUUID() }, alex)).status, 403);
   });
   await test("One attempt creates exactly one check, including concurrent requests", async () => {
     const body = { ...input, attempt_id: grant.attempt_id, request_key: randomUUID() };
@@ -80,7 +77,8 @@ try {
     assert.equal(results.filter(r => r.status === 200).length,1,JSON.stringify(results)); checkedOrder = results.find(r => r.status === 200).data;
     const [{ count }] = await sql.query(`select count(*) as count from fact_orders where credit_attempt_id = $1`, [grant.attempt_id]); assert.equal(count,1);
     const repeat = await request("/api/checks",body,alex);
-    if (results[0].status === 200) assert.equal(repeat.data.order_id,checkedOrder.order_id); else assert.equal(repeat.status,402);
+    if (results[0].status === 200) assert.equal(repeat.data.order_id,checkedOrder.order_id); else assert.equal(repeat.status,403);
+    assert.equal(checkedOrder.status, "queued");
     assert.equal((await request(`/api/orders/${checkedOrder.order_id}`,undefined,other)).status,404);
     assert.equal((await request("/api/analyze",{order_id:checkedOrder.order_id},other)).status,404);
     const [stored] = await sql.query(`select request_key from fact_orders where order_id = $1`, [checkedOrder.order_id]);
@@ -110,30 +108,59 @@ try {
     assert.equal(count.count, 1);
     await sql.query(`update fact_orders set retry_after_at = null where order_id = $1`, [claimed.order_id]);
   });
-  await test("Transfers use server prices; submitting does not credit the user", async () => {
-    const response = await request("/api/create-payment",{...input,amount:1,request_key:randomUUID()},alex);
-    assert.equal(response.status,200,JSON.stringify(response.data)); invoice=response.data; assert.equal(invoice.status,"pending"); assert.equal(invoice.amount,3000);
-    assert.equal((await request(`/api/orders/${invoice.order_id}`,{reference:"Sender Alex"},other)).status,404);
-    assert.equal((await request(`/api/orders/${invoice.order_id}`,{reference:"Sender Alex"},alex)).status,200);
-    assert.equal((await request("/api/account",undefined,alex)).data.attempts.length,0);
-    assert.equal((await request("/api/analyze",{order_id:invoice.order_id},alex)).status,402);
-    assert.equal((await request("/api/admin",{action:"approve",order_id:invoice.order_id,amount:1,bank_reference:"bank-001"},admin)).status,409);
+  await test("Checkout routes and payment approval actions are gone", async () => {
+    for (const path of ["/api/create-payment", "/api/demo-payment", "/api/midtrans-webhook"]) {
+      const response = await request(path, {}, alex);
+      assert.ok([404, 405].includes(response.status), `${path}: ${response.status}`);
+    }
+    const submitted = await request(`/api/orders/${checkedOrder.order_id}`, { reference: "Fixture" }, alex);
+    assert.ok([404, 405].includes(submitted.status), submitted.status);
+    for (const action of ["approve", "reject"]) {
+      assert.equal((await request("/api/admin", { action, order_id: checkedOrder.order_id }, admin)).status, 400);
+    }
+    assert.equal((await request("/api/account", undefined, alex)).data.attempts.length, 0);
   });
-  await test("Repeated transfer approvals credit once and bank references cannot be reused", async () => {
-    const body={action:"approve",order_id:invoice.order_id,amount:3000,bank_reference:"BANK-001"};
-    const approved=await request("/api/admin",body,admin); assert.equal(approved.status,200,JSON.stringify(approved.data));
-    await request("/api/admin",body,admin);
-    const state=await request("/api/account",undefined,alex); assert.equal(state.data.attempts.length,1);
-    const second=await request("/api/create-payment",{...input,request_key:randomUUID()},alex);
-    const duplicate=await request("/api/admin",{...body,order_id:second.data.order_id},admin); assert.equal(duplicate.status,409); assert.equal(duplicate.data.error,"bank_reference_already_used");
-    assert.equal((await orders.getOrder(second.data.order_id)).status,"pending");
-    await sql.query(`update fact_orders set expires_at = now() - interval '1 minute' where order_id = $1`,[second.data.order_id]);
-    assert.equal((await request("/api/admin",{...body,order_id:second.data.order_id,bank_reference:"BANK-002"},admin)).status,409);
-    assert.equal((await request(`/api/orders/${second.data.order_id}`,undefined,alex)).data.status,"expired");
-    assert.equal((await request("/api/account",undefined,alex)).data.attempts.length,1);
+  await test("Historical invoices are excluded while existing attempts and saved checks still work", async () => {
+    const { user: recipient } = (await request("/api/account", undefined, other)).data;
+    const { user: issuer } = (await request("/api/account", undefined, admin)).data;
+    const invoiceId = randomUUID(), queuedId = randomUUID(), reportId = randomUUID(), attemptId = randomUUID();
+    const report = { ok: true, summary: "Existing report fixture" };
+    await sql.query(`insert into fact_orders (order_id, user_id, url, plan, lang, amount, status, payment_method, paid_at, report_json)
+      values ($1, $4, $5, 'regular', 'en', 3000, 'paid', 'transfer', now(), null),
+        ($2, $4, $5, 'regular', 'en', 0, 'paid', 'credit', now(), null),
+        ($3, $4, $5, 'regular', 'en', 0, 'processed', 'credit', now(), $6)`, [invoiceId, queuedId, reportId, recipient.id, input.url, JSON.stringify(report)]);
+    await sql.query(`insert into fact_attempts (attempt_id, user_id, plan, source, source_order_id, granted_by, request_key)
+      values ($1, $2, 'regular', 'transfer', $3, $4, $1)`, [attemptId, recipient.id, invoiceId, issuer.id]);
+    await sql.query(`insert into fact_admin_audit (audit_id, admin_id, action, target_user_id, attempt_id, order_id)
+      values ($1, $2, 'approve_transfer', $3, $4, $5)`, [randomUUID(), issuer.id, recipient.id, attemptId, invoiceId]);
+    const state = (await request("/api/account", undefined, other)).data;
+    assert.deepEqual(state.attempts.map(a => a.attempt_id), [attemptId]);
+    assert.deepEqual(new Set(state.orders.map(order => order.order_id)), new Set([queuedId, reportId]));
+    assert.equal(state.orders.find(order => order.order_id === queuedId).status, "queued");
+    const audit = (await request("/api/admin", undefined, admin)).data;
+    assert.ok(audit.audit.length && audit.audit.every(entry => entry.action === "grant_attempt"));
+    assert.equal(Object.hasOwn(audit, "orders"), false);
+    assert.equal((await request(`/api/orders/${invoiceId}`, undefined, other)).status, 404);
+    assert.equal((await request("/api/analyze", { order_id: invoiceId }, other)).status, 404);
+    assert.equal(await orders.claimRetry(invoiceId), null);
+    assert.equal((await request(`/api/orders/${queuedId}`, undefined, other)).data.status, "queued");
+    assert.deepEqual((await request(`/api/orders/${reportId}`, undefined, other)).data.report, report);
+    assert.equal((await orders.claimRetry(queuedId)).status, "processing");
+    const checked = await request("/api/checks", { ...input, attempt_id: attemptId, request_key: randomUUID() }, other);
+    assert.equal(checked.status, 200, JSON.stringify(checked.data));
+    assert.equal((await request("/api/account", undefined, other)).data.attempts.length, 0);
+    const [invoice] = await sql.query(`select status from fact_orders where order_id = $1`, [invoiceId]);
+    assert.equal(invoice.status, "paid");
   });
-  await test("Admins can check both plans without buying or consuming credits",async()=>{
-    for(const plan of ["regular","advance"]){const response=await request("/api/checks",{...input,plan,request_key:randomUUID()},admin);assert.equal(response.status,200);assert.equal(response.data.amount,0);assert.equal(response.data.payment_method,"admin");}
+  await test("Admins can check both plans without consuming attempts", async () => {
+    for (const plan of ["regular", "advance"]) {
+      const response = await request("/api/checks", { ...input, plan, request_key: randomUUID() }, admin);
+      assert.equal(response.status, 200);
+      assert.equal(response.data.status, "queued");
+      for (const field of ["payment_method", "amount", "transfer_reference", "expires_at"]) {
+        assert.equal(Object.hasOwn(response.data, field), false);
+      }
+    }
   });
   await test("API-key failover handles invalid keys while a 429 cools down the shared pool",async()=>{
     const pool=await server.ssrLoadModule("/src/realorna/backend/key-pool.ts");
@@ -162,10 +189,12 @@ try {
     };
     const response=await request("/api/analyze",{order_id:checkedOrder.order_id},alex);assert.equal(response.status,200,JSON.stringify(response.data));assert.equal(response.data.report.ok,true);assert.equal(modelCalls,2);
     const again=await request("/api/analyze",{order_id:checkedOrder.order_id},alex);assert.equal(again.status,200);assert.equal(modelCalls,2);
-    assert.equal((await request("/api/account",undefined,alex)).data.attempts.length,1);
+    assert.equal((await request("/api/account",undefined,alex)).data.attempts.length,0);
   });
   await test("A provider 429 returns Retry-After, persists it, and blocks repeated analysis calls without spending another attempt",async()=>{
     await sql`delete from fact_ai_throttle`;
+    const granted = await request("/api/admin", { action: "grant", username: "alex", plan: "regular", request_key: randomUUID() }, admin);
+    assert.equal(granted.status, 200);
     let modelCalls=0;
     globalThis.fetch=async(url,options)=>{
       if(String(url).startsWith("https://api.openai.com/")){modelCalls++;return new Response("{}",{status:429,headers:{"Retry-After":"60"}});}
@@ -183,7 +212,7 @@ try {
     const fixture = { content_review: { all_items_read: true, all_core_claims_covered: true, issues: [] }, verdict: "BELUM_TERVERIFIKASI", summary: "Retry integration fixture.", claims: [], red_flags: [], sources: [], reference_date: "", meta: { title: "Fixture", platform: "web", author: "", published_at: "" } };
     for (const plan of ["regular", "advance"]) {
       await sql`delete from fact_ai_throttle`; await sql`delete from fact_ai_key_cooldowns`;
-      const expectedModel = plan === "regular" ? "gpt-6-luna" : "gpt-6-luna";
+      const expectedModel = "gpt-6.2-sol";
       const grantResult = await request("/api/admin", { action: "grant", username: "alex", plan, request_key: randomUUID() }, admin);
       assert.equal(grantResult.status, 200);
       const created = await request("/api/checks", { ...input, plan, attempt_id: grantResult.data.attempt_id, request_key: randomUUID() }, alex);
@@ -234,5 +263,5 @@ try {
       assert.equal(stored.status, "ready"); assert.equal(stored.used_order_id, null);
     } finally { if (previous === undefined) delete process.env.MEDIA_PYTHON; else process.env.MEDIA_PYTHON = previous; }
   });
-  console.log(JSON.stringify({ok:true,integration_checks:checks.length,live_bank_tested:false,live_openai_tested:false}));
+  console.log(JSON.stringify({ok:true,integration_checks:checks.length,live_openai_tested:false}));
 } finally { globalThis.fetch=originalFetch; await server.close(); }

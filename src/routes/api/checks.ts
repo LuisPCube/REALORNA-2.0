@@ -11,7 +11,7 @@ export const Route = createFileRoute("/api/checks")({ server: { handlers: {
       const input = await checkInput(body);
       const order = await createCheck(user, { ...input, key: requestKey(body.request_key),
         attemptId: typeof body.attempt_id === "string" ? body.attempt_id : undefined });
-      return json(await publicOrder(order));
+      return json(publicOrder(order));
     });
   },
 } } });

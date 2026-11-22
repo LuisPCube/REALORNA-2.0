@@ -14,12 +14,12 @@ import {
   X,
 } from "lucide-react";
 import { translate, type CopyKey } from "./i18n";
-import { PRICES, findIn, inspectLink, parseLink, uiVerdict, VIDEO } from "./safety";
+import { findIn, inspectLink, parseLink, uiVerdict, VIDEO } from "./safety";
 import { exampleReport, type ExampleKind } from "./examples";
 import { coverageText, reportText } from "./report-text";
 import { signOut } from "@/lib/auth/client";
 import { apiRequest, errorMessage, RequestError, say, useAccount } from "./account";
-import { AccountPanel, AdminPanel, TransferDialog } from "./AccountPanels";
+import { AccountPanel, AdminPanel } from "./AccountPanels";
 import type { AccountOrder, Attempt } from "./account-types";
 import type { ClaimStatus, FactErrCode, FactOk, Lang, Plan, CheckStage, SafetyItem, Verdict } from "./types";
 
@@ -61,10 +61,6 @@ function scallop(cx: number, cy: number, R: number, a: number, N: number) {
 }
 
 const MARK = scallop(20, 20, 17, 1.7, 12);
-
-function money(n: number) {
-  return "Rp " + n.toLocaleString("id-ID");
-}
 
 function adviceKey(v: Verdict): CopyKey {
   if (v === "FAKTA" || v === "SEBAGIAN_BENAR") return "advice_good";
@@ -123,15 +119,15 @@ export function RealornaApp() {
   const [toast, setToast] = useState("");
   const [toastOn, setToastOn] = useState(false);
   const [dark, setDark] = useState(false);
-  const [payOpen, setPayOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
   const [working, setWorking] = useState(false);
   const [retryUntil, setRetryUntil] = useState(0);
   const [retrySeconds, setRetrySeconds] = useState(0);
   const [adminOpen, setAdminOpen] = useState(false);
   const [selectedAttempt, setSelectedAttempt] = useState<Attempt | null>(null);
-  const [resumeOrderId, setResumeOrderId] = useState<string | undefined>();
   const account = useAccount();
+  const availableAttempts = account.attempts.filter(attempt => attempt.plan === plan).length;
+  const linkError = error === "err_empty" || error === "err_invalid";
   const handledAttempt = useRef("");
   const checkRequest = useRef<{ identity: string; key: string; orderId?: string; url: string; plan: Plan; lang: Lang; attemptId?: string } | null>(null);
   const toastTimer = useRef<number>(0);
@@ -220,6 +216,7 @@ export function RealornaApp() {
 
   function choosePlan(next: Plan, announce = false) {
     setPlan(next);
+    setError(current => current === "err_attempt_required" ? null : current);
     localStorage.setItem("rl:plan", JSON.stringify(next));
     if (announce) ping(t("toast_plan", { plan: translate(lang, next === "advance" ? "plan_advance" : "plan_regular") }));
   }
@@ -253,7 +250,7 @@ export function RealornaApp() {
   }
 
   async function runCheck() {
-    if (working || payOpen) return;
+    if (working) return;
     if (retryUntil > Date.now()) { ping(say(lang, "Please wait for the retry countdown.", "Tunggu hitungan mundur sebelum mencoba lagi.")); return; }
     const raw = url.trim();
     if (!raw) {
@@ -284,9 +281,11 @@ export function RealornaApp() {
       await executeCheck(previous.attemptId);
       return;
     }
-    if (account.user.admin || account.attempts.some(a => a.plan === plan)) {
+    if (account.user.admin || availableAttempts > 0) {
       await executeCheck(selectedAttempt?.plan === plan ? selectedAttempt.attempt_id : undefined);
-    } else { setResumeOrderId(undefined); setPayOpen(true); }
+    } else {
+      setError("err_attempt_required");
+    }
   }
 
   async function analyzeOrder(orderId: string) {
@@ -312,7 +311,7 @@ export function RealornaApp() {
   async function executeCheck(attemptId?: string) {
     if (working) return;
     if (retryUntil > Date.now()) return;
-    setWorking(true); setPayOpen(false);
+    setWorking(true);
     const link = parseLink(url);
     const looked = link ? inspectLink(link) : null;
     setPhase({ type: "scan", host: looked?.host || "", video: looked?.video || false });
@@ -328,7 +327,10 @@ export function RealornaApp() {
     } catch (e) {
       rememberCooldown(e);
       if (e instanceof RequestError && e.code === "attempt_required") {
-        checkRequest.current = null; setSelectedAttempt(null); setPhase({ type: "idle" }); setResumeOrderId(undefined); setPayOpen(true);
+        checkRequest.current = null;
+        setSelectedAttempt(null);
+        setPhase({ type: "idle" });
+        setError("err_attempt_required");
       } else {
         setPhase({ type: "fail", code: failCode(e instanceof RequestError ? e.code : "ai_failed"), supportId: e instanceof RequestError ? e.supportId : undefined, orderId: checkRequest.current?.orderId });
         ping(errorMessage(e,lang));
@@ -346,11 +348,9 @@ export function RealornaApp() {
     if (knownOrder?.status !== "processed" && retryUntil > Date.now()) return;
     setWorking(true);
     try {
-      // Load the owned saved check when retrying from the failure panel. Never
-      // recreate a paid order from the current (possibly edited) input field.
+      // Retry the saved check with its original input.
       const order = knownOrder ?? await apiRequest<AccountOrder>(`/api/orders/${encodeURIComponent(orderId)}`);
       setPlan(order.plan); setUrl(order.url); setLang(order.lang);
-      if (order.payment_method === "transfer") { setResumeOrderId(order.order_id); setPayOpen(true); return; }
       setPhase({ type: "scan", host: parseLink(order.url)?.hostname || "", video: Boolean(parseLink(order.url) && inspectLink(parseLink(order.url)!).video) });
       if (order.status === "processed") {
         const stored = knownOrder ? await apiRequest<{ report: FactOk }>(`/api/orders/${encodeURIComponent(orderId)}`) : order;
@@ -362,7 +362,6 @@ export function RealornaApp() {
   }
 
   function showReport(result: FactOk) {
-    setPayOpen(false);
     setError(null);
     setPhase({ type: "report", result });
     if (!result.demo) remember(result);
@@ -397,8 +396,6 @@ export function RealornaApp() {
     setPhase({ type: "idle" });
     ping(t("demo_reset"));
   }
-
-  const price = account.user?.admin ? say(lang,"Free for admin","Gratis untuk admin") : money(PRICES[plan]);
 
   return (
     <div className="rn" data-plan={plan}>
@@ -453,7 +450,7 @@ export function RealornaApp() {
                   key={p}
                   type="button"
                   className="opt"
-                  disabled={working || payOpen}
+                  disabled={working}
                   role="radio"
                   aria-checked={plan === p}
                   tabIndex={plan === p ? 0 : -1}
@@ -479,7 +476,7 @@ export function RealornaApp() {
               autoComplete="off"
             >
               <div className="row">
-                <div className={`field${error ? " invalid" : ""}`}>
+                <div className={`field${linkError ? " invalid" : ""}`}>
                   <Link2 className="field-ic" size={20} aria-hidden="true" />
                   <label className="sr" htmlFor="url">
                     {t("field_label")}
@@ -496,7 +493,7 @@ export function RealornaApp() {
                     spellCheck={false}
                     placeholder={t(plan === "advance" ? "ph_advance" : "ph_regular")}
                     value={url}
-                    aria-invalid={error ? true : undefined}
+                    aria-invalid={linkError ? true : undefined}
                     onChange={(e) => {
                       setUrl(e.target.value);
                       setError(null);
@@ -528,8 +525,8 @@ export function RealornaApp() {
                     {url ? t("clear") : t("paste")}
                   </button>
                 </div>
-                <button type="button" className="go" disabled={payOpen || working || account.loading || retrySeconds > 0} onClick={() => void runCheck()}>
-                  {payOpen || working ? t("checking") : retrySeconds > 0 ? say(lang, `Retry in ${retrySeconds}s`, `Coba lagi ${retrySeconds}d`) : t("check")}
+                <button type="button" className="go" disabled={working || account.loading || retrySeconds > 0} onClick={() => void runCheck()}>
+                  {working ? t("checking") : retrySeconds > 0 ? say(lang, `Retry in ${retrySeconds}s`, `Coba lagi ${retrySeconds}d`) : t("check")}
                 </button>
               </div>
               {error ? (
@@ -552,8 +549,8 @@ export function RealornaApp() {
 
             {selectedAttempt && <p className="success-line"><GiftNotice/>{say(lang,`Using your ${selectedAttempt.plan === "advance" ? "Advance" : "Regular"} attempt. Paste a link to start.`,`Menggunakan kesempatan ${selectedAttempt.plan === "advance" ? "Advance" : "Regular"}. Tempel tautan untuk mulai.`)}</p>}
             {retrySeconds > 0 && <p className="note" role="status">{say(lang,
-              `Please wait ${retrySeconds} seconds. Your saved check can be retried without another payment.`,
-              `Tunggu ${retrySeconds} detik. Pemeriksaan tersimpan bisa diulang tanpa membayar lagi.`)}</p>}
+              `Please wait ${retrySeconds} seconds. Retrying this saved check uses no additional attempt.`,
+              `Tunggu ${retrySeconds} detik. Mengulang cek ini tidak memakai kesempatan tambahan.`)}</p>}
             <div className="sources">
               <div className="src-row">
                 <span className="src-label">{t("src_news")}</span>
@@ -585,7 +582,7 @@ export function RealornaApp() {
 
             <div className="examples">
               <span>{t("try_example")}</span>
-              {(["real", "nah", "correction"] as ExampleKind[]).map(kind => <button key={kind} type="button" className="link-btn" disabled={working || payOpen}
+              {(["real", "nah", "correction"] as ExampleKind[]).map(kind => <button key={kind} type="button" className="link-btn" disabled={working}
                 onClick={() => { setExampleKind(kind); showReport(exampleReport(kind, lang)); }}>
                 {t(kind === "real" ? "ex_real" : kind === "nah" ? "ex_nah" : "ex_correction")}
               </button>)}
@@ -594,8 +591,8 @@ export function RealornaApp() {
 
             <div className="card-foot">
               <span className="quota">
-                <strong>{price}</strong>
-                <span>{t("per_check")}</span>
+                {account.user?.admin ? t("admin_access") : account.user
+                  ? t("attempt_count", { count: availableAttempts }) : t("sign_in_for_attempts")}
               </span>
               <a href="#plans">{t("compare_plans")}</a>
             </div>
@@ -699,7 +696,6 @@ export function RealornaApp() {
                 }}
               />
             </div>
-            <p className="pay">{t("pay_note")}</p>
           </section>
 
           <section className="sec">
@@ -742,8 +738,6 @@ export function RealornaApp() {
         {toast}
       </div>
 
-      {payOpen && <TransferDialog plan={plan} url={url.trim()} lang={lang} resumeOrderId={resumeOrderId}
-        onClose={() => setPayOpen(false)} onApproved={attemptId => void executeCheck(attemptId)}/>}
     </div>
   );
 }
@@ -1037,14 +1031,12 @@ function PlanCard({
           { yes: true, key: "feat_scan" },
           { yes: false, key: "feat_video" },
           { yes: false, key: "feat_ai" },
-          { yes: true, key: "feat_pay" },
         ]
       : [
           { yes: true, key: "feat_news" },
           { yes: true, key: "feat_scan" },
           { yes: true, key: "feat_video" },
           { yes: true, key: "feat_ai" },
-          { yes: true, key: "feat_pay" },
         ];
   return (
     <article className={`plan ${kind === "regular" ? "reg" : "adv"}`}>
@@ -1053,9 +1045,6 @@ function PlanCard({
         {kind === "advance" ? <span className="badge">{t("badge_video")}</span> : null}
       </div>
       <p className="blurb">{t(kind === "regular" ? "plan_regular_blurb" : "plan_advance_blurb")}</p>
-      <div className="price">
-        {money(PRICES[kind])} <small>{t("per_check")}</small>
-      </div>
       <ul className="feat">
         {features.map((f) => (
           <li key={f.key} className={f.yes ? "" : "no"}>

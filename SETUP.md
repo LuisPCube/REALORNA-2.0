@@ -1,8 +1,8 @@
-# Realorna: OpenAI, Real / Nah, accounts and transfers
+# Realorna setup
 
-The checker uses OpenAI web evidence to verify individual claims and returns Real / Nah with corrections. Existing username accounts, bank transfers, and admin-granted Regular/Advance attempts are retained.
+The checker uses OpenAI web evidence to verify individual claims and returns Real / Nah with corrections. Admins grant Regular and Advance attempts to registered users.
 
-The code has not been connected to your existing live Vercel database. Your database URL, bank details, OpenAI keys, and site URL are not available in the supplied ZIP. Configure them below before deploying.
+Configure your database, authentication, and OpenAI credentials in Vercel before deploying.
 
 ## 1. Configure Vercel
 
@@ -21,12 +21,9 @@ Use your existing Vercel project. If importing the extracted project into a new 
 | `ADMIN_USERNAME` | `realorna_admin`, or your chosen unique bootstrap username. |
 | `ADMIN_PASSWORD` | The generated value in the separate private credentials file, or your own 16–128 character password. |
 | `ADMIN_EMAIL` | The credentials file supplies `admin@realorna.local`. You may use your own email before first deployment. No email delivery is configured. |
-| `TRANSFER_BANK_NAME` | Your receiving bank's name. |
-| `TRANSFER_ACCOUNT_NUMBER` | Your actual receiving account number, as text. |
-| `TRANSFER_ACCOUNT_HOLDER` | The actual account holder name. |
-| `TRANSFER_NOTE` | Optional additional instructions displayed to customers. |
-| `OPENAI_TEXT_MODEL` | Article model for either plan. Default: `gpt-6-luna`. |
-| `OPENAI_MEDIA_MODEL` | Image/video claim model. Default: `gpt-6.1-terra`. |
+| `OPENAI_TEXT_MODEL` | Optional article model override. Defaults to `gpt-6.2-sol`. |
+| `OPENAI_VIDEO_MODEL` | Optional video model override. Defaults to `gpt-6.2-sol`. |
+| `OPENAI_MEDIA_MODEL` | Optional model override for image-only posts. Defaults to `gpt-6.1-terra`. |
 | `OPENAI_API_KEY` | Your server-side OpenAI key. For multiple authorized keys, see section 5. |
 
 `VITE_AUTH_ENABLED` is already `true` in `.grok/app-env.json`. Do not override it with `false`.
@@ -51,31 +48,19 @@ Keep the private credentials file out of your repository. It is intentionally ex
 4. Press **Send Regular** or **Send Advance**. Each press successfully completing adds one attempt.
 5. The recipient sees the attempt in their account. The admin can also copy the generated attempt link and share it manually.
 
-The link requires the recipient's login and cannot be redeemed by a different account. Registration treats `Alex`, `ALEX`, and `alex` as the same username; the database enforces this with a unique index, including racing registrations. Regular and Advance attempts are separate. One Regular attempt cannot buy an Advance check.
+The link requires the recipient's login. Username matching is case-insensitive and enforced by a unique index. Regular attempts cover news articles. Advance attempts cover news and supported public media.
 
-For your QRIS demo, show the payment QR from your banking or merchant app. Use that app's one-time QR feature if it supports one. After checking the actual incoming transaction there, send the appropriate attempt from the admin screen. Realorna does not generate or enforce the lifetime of that external QR.
+For an in-person purchase, the customer scans your printed static QR. Once you confirm receipt in your banking or merchant app, send the appropriate attempt from **Admin → Send attempts**. The website needs no bank environment variables. Existing accounts, attempts, and check history remain available after deployment.
 
-Admin accounts can run either plan without buying or consuming attempts. This privilege is enforced on the server.
+Admin accounts can run either plan without consuming attempts. The server enforces this privilege.
 
-## 4. Bank transfer verification
+## 4. Retry a saved check
 
-1. A signed-in customer with no available attempt presses **Check** and creates an invoice.
-2. Realorna displays your configured bank account, the exact amount, invoice ID, and a 24-hour expiry.
-3. The customer transfers and submits a transfer reference or sender name. Their button requests verification; it does not confirm payment.
-4. The admin opens **Admin → Transfer approvals** and checks the receiving account's actual transaction history.
-5. Enter the amount actually received and the bank's transaction reference, confirm that you checked the transaction, then approve. Approval adds exactly one attempt.
-
-Do not approve from a screenshot or a customer-supplied note alone. This integration has no bank API or automatic bank webhook. Payment authentication comes from the admin comparing the invoice with a real incoming bank transaction.
-
-Prices and promo discounts are calculated on the server. Repeated approvals cannot add a second credit, and a bank transaction reference cannot be used on two invoices. Approval, credit creation, and the audit record are one atomic database statement. Expired invoices cannot be approved; reconcile any late payment manually before granting an attempt.
-
-The old demo payment endpoint and Midtrans webhook return HTTP 410. They cannot mark a payment as paid. Old unowned Midtrans orders remain unowned and are not assigned to new users.
-
-An AI check uses an attempt once. If analysis fails, the failure panel shows **Retry for free / Coba lagi gratis**. It reloads the saved check and retries its original order ID, URL and plan; editing the input field cannot change that retry into a different check. Saved failures also appear under **Payments & recent checks → Retry for free**, with a visible count of saved retries, including after page reload or signing in again. Repeating Check with unchanged input in the same browser session also reuses the saved check. The consumed attempt stays attached to its original URL and plan; failure does not mint a transferable attempt or require another customer payment. Cooldowns are respected, and successful reports are reused without another provider call.
+An AI check consumes one attempt. If analysis fails, the failure panel and **Recent checks** both offer **Retry for free / Coba lagi gratis**. A retry uses the saved URL, plan, and attempt. Cooldowns apply to retries. Opening a completed report reuses the saved result.
 
 ## 5. OpenAI and content routing
 
-Set `OPENAI_API_KEY`, `OPENAI_TEXT_MODEL=gpt-6-luna`, `OPENAI_MEDIA_MODEL=gpt-6.1-terra`, and `OPENAI_TRANSCRIBE_MODEL=gpt-transcribe`. Model values are optional defaults; actual project access remains to be verified in deployment. Article checks use LUNA regardless of purchased plan. Visual media requires Advance and uses Terra. Transcription uses GPT Transcribe separately. Remove obsolete `OPENAI_MODEL` and `OPENAI_ADVANCE_MODEL`; neither controls this release. The legacy `OPENAI_REGULAR_MODEL` is an article-only fallback when `OPENAI_TEXT_MODEL` is absent.
+Set `OPENAI_API_KEY`. By default, articles use GPT-6.2 Sol at medium effort and video checks use GPT-6.2 Sol at high effort. Image-only posts use GPT-6.1 Terra. Transcription uses `gpt-transcribe` and can be configured through `OPENAI_TRANSCRIBE_MODEL`. The legacy `OPENAI_REGULAR_MODEL` is an article-only fallback when `OPENAI_TEXT_MODEL` is absent.
 
 Keep keys server-side and redeploy after changing environment variables. `OPENAI_API_KEYS` optionally accepts an ordered comma/newline-separated list or JSON array of authorized keys; the single `OPENAI_API_KEY` is appended, duplicates removed, and at most twelve keys accepted. A 429 does not immediately hop keys. Gemini and xAI credentials are unused.
 
@@ -85,7 +70,7 @@ The report derives Real/Nah from material claim statuses, shows concise correcti
 
 ### Request pacing
 
-The existing `0004_ai_throttle.sql` tables are reused under a new `openai` scope. No accounts, payments, or reports are deleted. Default behavior: one outbound request at a time, plus 12 seconds after a completed operation before the next begins. A request gate holds its lease until the provider body has been read. Transcription and checking share the gate across Vercel instances connected to the same database.
+The `0004_ai_throttle.sql` tables support the `openai` scope. By default, one outbound request runs at a time, with a 12-second pause after each completed operation. A request gate holds its lease until it reads the provider response. Transcription and checking share the gate across Vercel instances connected to the same database.
 
 | Optional variable | Default | Purpose |
 | --- | --- | --- |
@@ -104,18 +89,18 @@ Error responses include a support reference and safe diagnostic fields such as `
 
 ### Media and readability
 
-Articles use bounded page retrieval with JSON-LD/article/main extraction. A blocked or unreadable article fails without a made-up verdict. Social media uses actual downloads, FFmpeg audio/frame preparation, GPT Transcribe and Terra. Instagram image collections preserve every slide and caption in order. Read **MEDIA-DEPLOY.md** for supported URL forms, limits, platform access restrictions and honest coverage notes.
+Articles use bounded page retrieval with JSON-LD/article/main extraction. A blocked or unreadable article fails without a made-up verdict. Media checks download posts and use FFmpeg to prepare video audio and frames. Instagram image collections preserve every slide and caption in order. See **MEDIA-DEPLOY.md** for supported URL forms, limits, platform access restrictions, and coverage.
 
 ## 6. Local use and verification
 
 Use Node 24, Python 3.10+ and FFmpeg/ffprobe. Install JS dependencies with `npm ci`, create a Python virtual environment, and install `media/requirements.txt`. Set `MEDIA_PYTHON` to that environment's Python executable. `MEDIA_SCRIPT_PATH` is optional and defaults to `media/media_job.py` under the app root. No cookies or private credentials are bundled.
 
 - `npm run dev`: the existing app preview, with isolated PGlite if DATABASE_URL is absent.
-- `npm run typecheck`, `npm test`, `npm run test:factcheck`, `npm run test:ai-rate-limit`, `npm run test:payments`: application checks.
+- `npm run typecheck`, `npm test`, `npm run test:factcheck`, `npm run test:ai-rate-limit`, and `npm run test:attempts` run application checks.
 - `npm run test:media`: isolated media fixtures; defaults to `.media-venv/bin/python3`, or your `MEDIA_PYTHON`.
 - `python -m unittest discover -s media -p 'test_*.py'`: Python media tests, including actual FFmpeg and offline yt-dlp download/merge.
 - `npm run build`: legacy Nitro/Vercel output plus migration/seeding; use Container Runtime for production media.
 - `npm run build:container`, then `npm run start:container`: production Node server build/start, with runtime database migration/seeding.
 - `docker build -f Dockerfile.vercel .`: full production-image acceptance check when Docker is available.
 
-Do not run fixture payment tests with a live DATABASE_URL or VERCEL environment; they refuse that configuration. See **VERIFICATION.md** for the latest actual results and limits.
+The attempt integration tests use an isolated local database and reject a live `DATABASE_URL` or `VERCEL` environment.

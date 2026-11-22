@@ -12,7 +12,6 @@ export const Route = createFileRoute("/api/analyze")({ server: { handlers: {
       const orderId = typeof body.order_id === "string" ? body.order_id : "";
       const order = await getOrder(orderId, user.id);
       if (!order) throw new ApiError("not_found", 404);
-      if (!["admin", "credit"].includes(order.payment_method)) throw new ApiError("attempt_required", 402);
       try {
         const result = await retryCheck(orderId);
         if (!result?.report) return json({ error: "processing" }, 409);

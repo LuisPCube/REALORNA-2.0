@@ -5,7 +5,7 @@ import { resolve, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 if (process.env.DATABASE_URL?.trim() || process.env.VERCEL) throw new Error('Run media fixtures without production configuration.');
 process.env.OPENAI_API_KEYS = 'fixture-key'; delete process.env.OPENAI_API_KEY;
-for (const key of ['OPENAI_TEXT_MODEL','OPENAI_MEDIA_MODEL','OPENAI_TRANSCRIBE_MODEL','OPENAI_REGULAR_MODEL']) delete process.env[key];
+for (const key of ['OPENAI_TEXT_MODEL','OPENAI_MEDIA_MODEL','OPENAI_VIDEO_MODEL','OPENAI_TRANSCRIBE_MODEL','OPENAI_REGULAR_MODEL']) delete process.env[key];
 process.env.OPENAI_ADVANCE_MODEL = 'legacy-sol-must-be-ignored';
 process.env.OPENAI_MIN_INTERVAL_MS = '1000'; process.env.OPENAI_MAX_QUEUE_WAIT_MS = '2000';
 const folder = await mkdtemp(join(tmpdir(), 'realorna-media-fixture-'));
@@ -42,13 +42,14 @@ try {
   globalThis.fetch=async(url,options)=>{assert.equal(String(url),'https://api.openai.com/v1/responses');const b=JSON.parse(options.body);sent.push(b);return provider();};
   const out=await flow.checkOrder({url:'https://www.instagram.com/p/fixture/',plan:'advance',lang:'id'},async s=>{stages.push(s)});
   assert.equal(sent.length,1);const body=sent[0];assert.equal(body.model,'gpt-6.1-terra');assert.equal(body.tool_choice,'required');
+  assert.equal(body.reasoning,undefined);
   const parts=body.input[0].content;assert.equal(parts.filter(i=>i.type==='input_image').length,2);assert.ok(parts.filter(i=>i.type==='input_image').every(i=>i.image_url.startsWith('data:image/jpeg;base64,')&&i.detail==='high'));
   assert.match(parts[0].text,/Synthetic caption/);assert.match(parts.find(i=>i.text?.includes('slide 2')).text,/slide 2 of 2/);
   assert.deepEqual(stages,['reading','downloading','preparing_media','verifying']);assert.equal(out.report.coverage.slides,2);assert.equal(out.report.verdict,'FAKTA');
  });
- await test('Video audio uploads to GPT Transcribe, then its transcript and frames reach Terra',async()=>{
+ await test('Video audio uploads to GPT Transcribe, then its transcript and frames reach GPT-6.2 Sol at high effort',async()=>{
   const calls=[];
-  globalThis.fetch=async(url,options)=>{calls.push(String(url));if(String(url).endsWith('/transcriptions')){assert.ok(options.body instanceof FormData);assert.equal(options.body.get('model'),'gpt-transcribe');assert.equal(options.body.get('file').name,'speech.mp3');assert.ok(options.body.get('file').size>1000);return new Response(JSON.stringify({text:'Synthetic speech claim for the test.'}));}const b=JSON.parse(options.body);assert.equal(b.model,'gpt-6.1-terra');assert.match(b.input[0].content[0].text,/Synthetic speech claim/);assert.equal(b.input[0].content.filter(i=>i.type==='input_image').length,1);return provider();};
+  globalThis.fetch=async(url,options)=>{calls.push(String(url));if(String(url).endsWith('/transcriptions')){assert.ok(options.body instanceof FormData);assert.equal(options.body.get('model'),'gpt-transcribe');assert.equal(options.body.get('file').name,'speech.mp3');assert.ok(options.body.get('file').size>1000);return new Response(JSON.stringify({text:'Synthetic speech claim for the test.'}));}const b=JSON.parse(options.body);assert.equal(b.model,'gpt-6.2-sol');assert.equal(b.reasoning.effort,'high');assert.match(b.input[0].content[0].text,/Synthetic speech claim/);assert.equal(b.input[0].content.filter(i=>i.type==='input_image').length,1);return provider();};
   const stages=[];const out=await flow.checkOrder({url:'https://www.instagram.com/reel/fixture/',plan:'advance',lang:'id'},async s=>{stages.push(s)});
   assert.equal(calls.length,2);assert.ok(calls[0].endsWith('/transcriptions'));assert.ok(stages.includes('transcribing'));assert.equal(out.report.coverage.transcribed_tracks,1);assert.equal(out.report.coverage.sampled_frames,true);
  });

@@ -1,12 +1,10 @@
 import type { FactOk, Lang, Plan, CheckStage } from "./types";
 export type Account = { id: string; username: string; email: string; admin: boolean };
-export type Attempt = { attempt_id: string; plan: Plan; source: string; created_at: string };
-export type TransferDetails = { bank: string; number: string; holder: string; note: string };
+export type Attempt = { attempt_id: string; plan: Plan; created_at: string };
+export type CheckStatus = "queued" | "processing" | "processed" | "failed";
 export type AccountOrder = {
-  order_id: string; url: string; plan: Plan; lang: Lang; amount: number;
-  status: string; payment_method: string; created_at: string; expires_at: string | null;
-  transfer_reference: string | null; error: string | null; report?: FactOk | null;
+  order_id: string; url: string; plan: Plan; lang: Lang;
+  status: CheckStatus; created_at: string; error: string | null; report?: FactOk | null;
   retry_after_at?: string | null; progress_stage?: CheckStage | null;
 };
 export type AccountState = { user: Account | null; attempts: Attempt[]; orders: AccountOrder[] };
-export type AdminOrder = AccountOrder & { username: string; bank_reference: string | null };

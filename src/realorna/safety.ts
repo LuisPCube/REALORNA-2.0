@@ -115,8 +115,6 @@ export const EXAMPLES = {
   video: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
 } as const;
 
-export const PRICES = { regular: 3000, advance: 10000 } as const;
-export const PROMOS: Record<string, number> = { HEMAT10: 0.1 };
 
 export function findIn(map: Record<string, string>, host: string) {
   for (const domain in map) {

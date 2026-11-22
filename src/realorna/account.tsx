@@ -31,19 +31,14 @@ export function errorMessage(error: unknown, lang: Lang) {
   const messages: Record<string, [string, string]> = {
     media_setup: ["The media tools are not installed on this deployment. Contact the admin.", "Perangkat pemrosesan media belum terpasang di deployment ini. Hubungi admin."],
     username_not_found: ["Username was not found. Ask the user to register first.", "Username tidak ditemukan. Minta pengguna daftar dahulu."],
-    bank_reference_already_used: ["This bank reference has already been credited.", "Referensi bank ini sudah pernah dikreditkan."],
-    payment_not_pending_or_amount_mismatch: ["Check the amount and invoice status. Expired invoices cannot be approved.", "Periksa nominal dan status tagihan. Tagihan kedaluwarsa tidak dapat disetujui."],
-    payment_not_pending: ["This invoice is no longer pending.", "Tagihan ini tidak lagi menunggu pembayaran."],
     login_required: ["Please sign in again.", "Silakan masuk kembali."],
     admin_required: ["This menu requires an admin account.", "Menu ini hanya untuk admin."],
-    transfer_unconfigured: ["Bank details have not been configured. Please contact the admin.", "Detail rekening belum diatur. Silakan hubungi admin."],
     configuration_required: ["The server needs its database and sign-in configuration.", "Database dan konfigurasi login server belum lengkap."],
-    attempt_required: ["No unused attempt is available for this plan.", "Tidak ada kesempatan tersisa untuk paket ini."],
     request_conflict: ["This request was already used with different details. Refresh and try again.", "Permintaan ini sudah dipakai dengan detail berbeda. Muat ulang dan coba lagi."],
     rate: ["The AI service needs a pause. Wait for the countdown, then retry this saved check without another attempt.", "Layanan AI perlu jeda. Tunggu hitungan mundur, lalu ulangi pemeriksaan tersimpan ini tanpa kesempatan tambahan."],
     ai_busy: ["The check is waiting for AI capacity. Retry the saved check after the countdown; no extra attempt is needed.", "Pemeriksaan menunggu giliran layanan AI. Coba ulang pemeriksaan tersimpan setelah hitungan mundur; tidak perlu kesempatan tambahan."],
-    ai_quota: ["The AI service needs an admin to check its credits or spending limits. Your check is saved; another payment will not fix this.", "Admin perlu memeriksa saldo atau batas penggunaan layanan AI. Pemeriksaanmu tersimpan; membayar lagi tidak memperbaiki masalah ini."],
-    ai_timeout: ["The AI request took too long. Retry this saved check without another payment.", "Permintaan AI melewati batas waktu. Coba ulang pemeriksaan tersimpan ini tanpa membayar lagi."],
+    ai_quota: ["The AI service needs an admin to check its credits or spending limits. Your check is saved.", "Admin perlu memeriksa saldo atau batas penggunaan layanan AI. Pemeriksaanmu tersimpan."],
+    ai_timeout: ["The AI request took too long. Retry this saved check without using another attempt.", "Permintaan AI melewati batas waktu. Ulangi cek ini tanpa memakai kesempatan tambahan."],
     ai_unavailable: ["The AI service is not configured or its keys are unavailable. Your attempt stays with this check for retry.", "Layanan AI belum diatur atau key tidak tersedia. Kesempatanmu tetap terikat pada pemeriksaan ini untuk dicoba ulang."],
   };
   const item = messages[code];
