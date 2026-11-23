@@ -23,6 +23,11 @@ export type PreparedMedia = {
   images: VisualInput[]; audio: { bytes: Uint8Array; item: number }[]; coverage: MediaCoverage;
 };
 const mediaCodes = ["media_setup", "media_unavailable", "media_unsupported", "media_limit", "media_partial", "media_timeout"] as const;
+type MediaCode = (typeof mediaCodes)[number];
+
+function mediaFailure(code: MediaCode, reason: string) {
+  return new CheckError(code, 0, "rate", { origin: "media", reason });
+}
 
 function childEnvironment(): NodeJS.ProcessEnv {
   // Extractors never receive database credentials, auth secrets, or OpenAI keys.
@@ -40,19 +45,26 @@ async function runWorker(input: Record<string, unknown>, timeout: number, onStag
   return new Promise<Record<string, unknown>>((resolve, reject) => {
     const child = spawn(python, [script], { env: childEnvironment(), stdio: ["pipe", "pipe", "ignore"], detached: process.platform !== "win32" });
     let output = "", last: Record<string, unknown> | undefined, finished = false, bytes = 0;
+    let workerStage: "downloading" | "preparing_media" | undefined;
     let stageUpdates = Promise.resolve();
     const stop = () => {
       if (!child.pid) return;
       try { process.platform === "win32" ? child.kill("SIGKILL") : process.kill(-child.pid, "SIGKILL"); } catch { /* already exited */ }
     };
-    const fail = (code: typeof mediaCodes[number]) => { if (finished) return; finished = true; clearTimeout(timer); stop(); reject(new CheckError(code)); };
+    const fail = (code: MediaCode, reason: string = workerStage ?? "worker_startup") => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      stop();
+      reject(mediaFailure(code, reason));
+    };
     const timer = setTimeout(() => fail("media_timeout"), timeout);
     child.on("error", () => fail("media_setup"));
     child.stdin.on("error", () => {});
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       bytes += Buffer.byteLength(chunk);
-      if (bytes > 200_000) { fail("media_partial"); return; }
+      if (bytes > 200_000) { fail("media_partial", "invalid_worker_output"); return; }
       output += chunk;
       let end: number;
       while ((end = output.indexOf("\n")) >= 0) {
@@ -61,24 +73,25 @@ async function runWorker(input: Record<string, unknown>, timeout: number, onStag
           const data = JSON.parse(line) as Record<string, unknown>;
           if (data.stage === "downloading" || data.stage === "preparing_media") {
             const stage = data.stage;
+            workerStage = stage;
             stageUpdates = stageUpdates.then(() => onStage?.(stage)).then(() => {});
             // Attach a handler immediately; DB failure must stop this check.
-            void stageUpdates.catch(() => fail("media_unavailable"));
+            void stageUpdates.catch(() => fail("media_unavailable", "progress_update"));
           } else last = data;
-        } catch { fail("media_partial"); }
+        } catch { fail("media_partial", "invalid_worker_output"); }
       }
     });
     child.on("close", () => {
       if (finished) return;
       finished = true; clearTimeout(timer); stop();
       void stageUpdates.then(() => {
-        if (!last) return reject(new CheckError("media_setup"));
+        if (!last) return reject(mediaFailure("media_setup", workerStage ?? "worker_startup"));
         if (last.ok !== true) {
           const code = mediaCodes.find(code => code === last?.error) || "media_unavailable";
-          return reject(new CheckError(code));
+          return reject(mediaFailure(code, workerStage ?? "worker_startup"));
         }
         resolve(last);
-      }).catch(() => reject(new CheckError("media_unavailable")));
+      }).catch(() => reject(mediaFailure("media_unavailable", "progress_update")));
     });
     child.stdin.end(JSON.stringify(input));
   });
@@ -106,7 +119,7 @@ export async function ensureMediaReady() {
 }
 
 export async function readConfinedFile(folder: string, name: string, max: number) {
-  if (!/^[a-z0-9-]+\.(jpg|mp3)$/.test(name)) throw new CheckError("media_partial");
+  if (!/^[a-z0-9-]+\.(jpg|mp3)$/.test(name)) throw mediaFailure("media_partial", "invalid_prepared_file");
   try {
     const root = await realpath(folder), path = await realpath(join(root, name));
     const rel = relative(root, path);
@@ -114,7 +127,7 @@ export async function readConfinedFile(folder: string, name: string, max: number
     const info = await stat(path);
     if (!info.isFile() || info.size < 64 || info.size > max) throw new CheckError("media_partial");
     return new Uint8Array(await readFile(path));
-  } catch { throw new CheckError("media_partial"); }
+  } catch { throw mediaFailure("media_partial", "invalid_prepared_file"); }
 }
 
 export async function prepareMedia(url: string, deadline: number, onStage?: (stage: CheckStage) => Promise<void>): Promise<PreparedMedia> {
@@ -127,14 +140,14 @@ export async function prepareMedia(url: string, deadline: number, onStage?: (sta
     if (timeout < 10_000) throw new CheckError("media_timeout");
     const raw = await runWorker({ url, workdir: folder, timeout_seconds: Math.min(100, (timeout - 2000) / 1000) }, timeout, onStage);
     const parsed = ManifestSchema.safeParse(raw);
-    if (!parsed.success) throw new CheckError("media_partial");
+    if (!parsed.success) throw mediaFailure("media_partial", "invalid_manifest");
     const media = parsed.data;
-    if (media.items !== media.expected_items || media.audio.length > media.videos) throw new CheckError("media_partial");
+    if (media.items !== media.expected_items || media.audio.length > media.videos) throw mediaFailure("media_partial", "incomplete_manifest");
     const covered = new Set(media.images.map(i => i.item));
-    if (covered.size !== media.items || [...covered].some(i => i > media.items)) throw new CheckError("media_partial");
+    if (covered.size !== media.items || [...covered].some(i => i > media.items)) throw mediaFailure("media_partial", "incomplete_manifest");
     const images = await Promise.all(media.images.map(async i => {
       const bytes = await readConfinedFile(folder!, i.path, 1_800_000);
-      if (bytes[0] !== 0xff || bytes[1] !== 0xd8) throw new CheckError("media_partial");
+      if (bytes[0] !== 0xff || bytes[1] !== 0xd8) throw mediaFailure("media_partial", "invalid_prepared_file");
       return { bytes, label: i.type === "slide" ? `Post item / slide ${i.item} of ${media.items}` : `Video at post item ${i.item}, frame at ${i.timestamp?.toFixed(2)} seconds` };
     }));
     if (images.reduce((sum, image) => sum + image.bytes.length, 0) > 18_000_000) throw new CheckError("media_limit");

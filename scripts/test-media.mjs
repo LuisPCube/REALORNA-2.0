@@ -14,7 +14,7 @@ process.env.MEDIA_PYTHON = python;
 // Actual JPEG/MP3 assets. Fixture worker replaces only platform retrieval.
 execFileSync('ffmpeg', ['-v','error','-f','lavfi','-i','color=c=blue:s=320x240','-frames:v','1','-threads','1',join(folder,'fixture.jpg')]);
 execFileSync('ffmpeg', ['-v','error','-f','lavfi','-i','sine=frequency=440:duration=1','-b:a','48k',join(folder,'fixture.mp3')]);
-await writeFile(join(folder,'worker.py'), `import sys,json,pathlib,shutil\ndata=json.load(sys.stdin)\nif data.get('action')=='health':\n print(json.dumps({'ok':True}));sys.exit(0)\nw=pathlib.Path(data['workdir']);source=pathlib.Path(__file__).parent\nif 'partial' in data['url']:\n print(json.dumps({'ok':False,'error':'media_partial'}));sys.exit(2)\nfor stage in ['downloading','preparing_media']:print(json.dumps({'stage':stage}),flush=True)\nshutil.copyfile(source/'fixture.jpg',w/'image-01.jpg')\nshutil.copyfile(source/'fixture.jpg',w/'image-02.jpg')\nshutil.copyfile(source/'fixture.mp3',w/'audio-01.mp3')\nvideo='/reel/' in data['url']\nimages=[{'path':'image-01.jpg','item':1,'type':'frame' if video else 'slide','timestamp':0}]\nif not video and 'missing' not in data['url']:images.append({'path':'image-02.jpg','item':2,'type':'slide'})\nprint(json.dumps({'ok':True,'complete':True,'platform':'instagram','url':data['url'],'title':'Synthetic media fixture','caption':'Synthetic caption','author':'fixture','published_at':'2020-01-02','expected_items':1 if video else 2,'items':1 if video else 2,'videos':1 if video else 0,'duration_seconds':1 if video else 0,'images':images,'audio':[{'path':'audio-01.mp3','item':1,'duration':1}] if video else []}))\n`);
+await writeFile(join(folder,'worker.py'), `import sys,json,pathlib,shutil\ndata=json.load(sys.stdin)\nif data.get('action')=='health':\n print(json.dumps({'ok':True}));sys.exit(0)\nw=pathlib.Path(data['workdir']);source=pathlib.Path(__file__).parent\nprint(json.dumps({'stage':'downloading'}),flush=True)\nif 'partial' in data['url']:\n print(json.dumps({'ok':False,'error':'media_partial'}));sys.exit(2)\nprint(json.dumps({'stage':'preparing_media'}),flush=True)\nif 'prepare-failed' in data['url']:\n print(json.dumps({'ok':False,'error':'media_partial'}));sys.exit(2)\nshutil.copyfile(source/'fixture.jpg',w/'image-01.jpg')\nshutil.copyfile(source/'fixture.jpg',w/'image-02.jpg')\nshutil.copyfile(source/'fixture.mp3',w/'audio-01.mp3')\nvideo='/reel/' in data['url']\nimages=[{'path':'image-01.jpg','item':1,'type':'frame' if video else 'slide','timestamp':0}]\nif not video and 'missing' not in data['url']:images.append({'path':'image-02.jpg','item':2,'type':'slide'})\nprint(json.dumps({'ok':True,'complete':True,'platform':'instagram','url':data['url'],'title':'Synthetic media fixture','caption':'Synthetic caption','author':'fixture','published_at':'2020-01-02','expected_items':1 if video else 2,'items':1 if video else 2,'videos':1 if video else 0,'duration_seconds':1 if video else 0,'images':images,'audio':[{'path':'audio-01.mp3','item':1,'duration':1}] if video else []}))\n`);
 process.env.MEDIA_SCRIPT_PATH = join(folder,'worker.py');
 const { createServer } = await import('vite');
 const server = await createServer({ server:{ middlewareMode:true },logLevel:'error' });
@@ -53,9 +53,19 @@ try {
   const stages=[];const out=await flow.checkOrder({url:'https://www.instagram.com/reel/fixture/',plan:'advance',lang:'id'},async s=>{stages.push(s)});
   assert.equal(calls.length,2);assert.ok(calls[0].endsWith('/transcriptions'));assert.ok(stages.includes('transcribing'));assert.equal(out.report.coverage.transcribed_tracks,1);assert.equal(out.report.coverage.sampled_frames,true);
  });
- await test('Partial or missing slides stop before ASR or verification requests',async()=>{
+ await test('Media failures report their stage and stop before ASR or verification requests',async()=>{
   let calls=0;globalThis.fetch=async()=>{calls++;return provider()};
-  for(const tail of ['partial','missing'])await assert.rejects(()=>flow.checkOrder({url:`https://www.instagram.com/p/${tail}/`,plan:'advance',lang:'id'}),e=>e.code==='media_partial');
+  const failures = { partial: 'downloading', 'prepare-failed': 'preparing_media', missing: 'incomplete_manifest' };
+  for (const [tail, reason] of Object.entries(failures)) {
+    await assert.rejects(
+      () => flow.checkOrder({url:`https://www.instagram.com/p/${tail}/`,plan:'advance',lang:'id'}),
+      error => {
+        assert.equal(error.code, 'media_partial');
+        assert.deepEqual(error.diagnostic, { origin: 'media', reason });
+        return true;
+      },
+    );
+  }
   assert.equal(calls,0);
  });
  await test('Transcription quota errors cannot become caption-only verified reports',async()=>{

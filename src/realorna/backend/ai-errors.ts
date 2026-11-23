@@ -1,5 +1,5 @@
 export type AiDiagnostic = {
-  origin: "openai" | "transport" | "app_queue" | "app_pacing" | "app_cooldown" | "deadline" | "saved_check" | "configuration";
+  origin: "openai" | "media" | "transport" | "app_queue" | "app_pacing" | "app_cooldown" | "deadline" | "saved_check" | "configuration";
   reason?: string;
   provider_status?: number;
   provider_code?: string;

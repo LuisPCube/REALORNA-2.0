@@ -40,12 +40,14 @@ class MediaTests(unittest.TestCase):
         with patch.object(m.socket, "getaddrinfo", return_value=[(2, 1, 6, "", ("127.0.0.1", 443))]):
             with self.assertRaises(m.MediaError): m.validate_remote("https://example.com/media")
     def test_uniform_and_scene_frames_cover_both_ends(self):
-        times = m.frame_times(120, [1.1, 4.1, 70.2, 99.8], 16)
+        timestamps = [i / 10 for i in range(1200)]
+        times = m.frame_times(timestamps, [1.1, 4.1, 70.2, 99.8], 16)
         self.assertEqual(times[0], 0)
         self.assertAlmostEqual(times[-1], 119.9)
         self.assertIn(70.2, times)
         self.assertLessEqual(len(times), 16)
         self.assertEqual(times, sorted(set(times)))
+        self.assertTrue(set(times) <= set(timestamps))
     def fake_gallery(self, count, actual, indices=None, queue=False):
         from gallery_dl import extractor
         from gallery_dl.extractor.message import Message
@@ -90,7 +92,7 @@ class MediaTests(unittest.TestCase):
             fake = {"streams": [{"codec_type": "video", "codec_name": "h264", "width": 320, "height": 240}], "format": {"duration": "301"}}
             with patch.object(m, "probe", return_value=fake), self.assertRaisesRegex(m.MediaError, "media_limit"):
                 m.prepare([Path(temp)/"unused.mp4"], Path(temp))
-    def test_real_ytdlp_downloads_and_merges_separate_audio_video(self):
+    def test_reel_without_duration_keeps_audio_when_video_ends_first(self):
         import yt_dlp
         from yt_dlp.networking.common import Response
         import io
@@ -98,13 +100,20 @@ class MediaTests(unittest.TestCase):
             root = Path(temp)
             video = root/"fixture-video.mp4"
             audio = root/"fixture-audio.mp3"
-            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=10:duration=1", "-an", "-c:v", "mpeg4", "-threads", "1", str(video)], check=True)
-            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-b:a", "48k", str(audio)], check=True)
+            subprocess.run([
+                "ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                "color=c=blue:size=120x160:rate=2:duration=99.5",
+                "-an", "-c:v", "mpeg4", "-threads", "1", str(video),
+            ], check=True)
+            subprocess.run([
+                "ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                "sine=frequency=440:duration=100", "-b:a", "48k", str(audio),
+            ], check=True)
             fixtures = {"https://fixture.example/video.mp4": video.read_bytes(), "https://fixture.example/audio.mp3": audio.read_bytes()}
             class OfflineYDL(yt_dlp.YoutubeDL):
                 def extract_info(self, url, download=False, **kwargs):
-                    return self.process_ie_result({"id": "fixture", "title": "Synthetic", "duration": 1, "description": "Offline download fixture", "formats": [
-                        {"format_id": "v", "url": "https://fixture.example/video.mp4", "ext": "mp4", "vcodec": "mpeg4", "acodec": "none", "height": 240, "protocol": "https"},
+                    return self.process_ie_result({"id": "fixture", "title": "Synthetic", "description": "Offline download fixture", "formats": [
+                        {"format_id": "v", "url": "https://fixture.example/video.mp4", "ext": "mp4", "vcodec": "mpeg4", "acodec": "none", "height": 160, "protocol": "https"},
                         {"format_id": "a", "url": "https://fixture.example/audio.mp3", "ext": "mp3", "vcodec": "none", "acodec": "mp3", "protocol": "https"},
                     ]}, download=download)
                 def urlopen(self, request):
@@ -112,13 +121,19 @@ class MediaTests(unittest.TestCase):
                     blob = fixtures[url]
                     return Response(io.BytesIO(blob), url, {"Content-Length": str(len(blob))}, 200)
             with patch.object(yt_dlp, "YoutubeDL", OfflineYDL), patch.object(m, "validate_remote", side_effect=lambda url: url):
-                paths, meta = m.ytdlp_download("https://www.youtube.com/watch?v=jNQXAC9IVRw", root)
+                paths, meta = m.ytdlp_download("https://www.instagram.com/reel/fixture123/", root)
             self.assertEqual(len(paths), 1)
             self.assertTrue(paths[0].is_file())
             streams = m.probe(paths[0])["streams"]
             self.assertIn("audio", [stream["codec_type"] for stream in streams])
             self.assertIn("video", [stream["codec_type"] for stream in streams])
             self.assertEqual(meta["caption"], "Offline download fixture")
+            prepared = m.prepare(paths, root)
+            self.assertTrue(prepared["complete"])
+            self.assertAlmostEqual(prepared["duration_seconds"], 100, delta=0.1)
+            self.assertAlmostEqual(prepared["images"][-1]["timestamp"], 99, delta=0.1)
+            extracted_audio = root / prepared["audio"][0]["path"]
+            self.assertAlmostEqual(float(m.probe(extracted_audio)["format"]["duration"]), 100, delta=0.2)
 
     def test_untrusted_media_cannot_make_ffmpeg_fetch_a_remote_playlist(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -5,6 +5,7 @@ Run in a new temporary directory per check. No cookies or account credentials.
 """
 import contextlib
 import datetime
+from bisect import bisect_left
 import ipaddress
 import json
 import logging
@@ -395,15 +396,19 @@ def jpeg(source, target):
     if not target.is_file() or not 64 <= target.stat().st_size <= 1_800_000:
         raise MediaError("media_partial")
 
-def frame_times(duration, changes=(), budget=12):
-    # Uniform coverage plus scene changes, retaining first/last frame context.
-    count = min(budget, max(2, math.ceil(duration / 12)))
-    uniform = [round((duration - min(0.1, duration / 10)) * i / (count - 1), 3) for i in range(count)]
-    extra = [round(t, 3) for t in changes if 0 < t < duration and all(abs(t - x) > 0.35 for x in uniform)]
-    if len(extra) > budget - count:
-        slots = budget - count
-        extra = [extra[min(len(extra) - 1, int(i * len(extra) / slots))] for i in range(slots)] if slots else []
-    return sorted(set(uniform + extra))
+def frame_times(timestamps, changes=(), budget=12):
+    if len(timestamps) < 2:
+        return timestamps
+    first, last = timestamps[0], timestamps[-1]
+    count = min(budget, max(2, math.ceil((last - first) / 12)))
+    step = (last - first) / (count - 1)
+    uniform = {timestamps[bisect_left(timestamps, first + i * step)] for i in range(count - 1)}
+    uniform.add(last)
+    extra = [t for t in changes if first < t < last and all(abs(t - x) > 0.35 for x in uniform)]
+    slots = budget - len(uniform)
+    if len(extra) > slots:
+        extra = [extra[i * len(extra) // slots] for i in range(slots)]
+    return sorted(uniform.union(extra))
 
 def prepare(paths, folder):
     results, audio, video_count, duration_total = [], [], 0, 0.0
@@ -439,13 +444,24 @@ def prepare(paths, folder):
             if not target.is_file() or target.stat().st_size > 6_000_000:
                 raise MediaError("media_limit")
             audio.append({"path": target.name, "item": n, "duration": round(duration, 2)})
-        # Cheap local scene pass. Metadata is on stdout; video stays local.
-        scan = command(["ffmpeg", "-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe", "-i", str(path),
-                        "-an", "-vf", "scale=320:-2,select='gt(scene,0.32)',metadata=print:file=-", "-vsync", "vfr", "-f", "null", "-"], 25).decode("utf-8", errors="replace")
-        changes = [float(t) for t in re.findall(r"pts_time:([0-9.]+)", scan)]
-        for j, timestamp in enumerate(frame_times(duration, changes, frame_budget), 1):
+        # Measure the picture timeline during scene detection. The container may
+        # run longer than the picture, and variable-rate video may have gaps.
+        scan = command(["ffmpeg", "-nostdin", "-v", "error", "-xerror", "-protocol_whitelist", "file,pipe", "-i", str(path),
+                        "-map", "0:V:0", "-an", "-vf", "scale=320:-2,select='gte(scene,0)',metadata=print:key=lavfi.scene_score:file=-",
+                        "-vsync", "vfr", "-f", "null", "-"], 25)
+        scores = [
+            (float(pts), float(score))
+            for pts, score in re.findall(rb"pts_time:([0-9.eE+-]+)\r?\nlavfi\.scene_score=([0-9.]+)", scan)
+        ]
+        timestamps = sorted({pts for pts, _ in scores if 0 <= pts <= duration})
+        if not timestamps:
+            raise MediaError("media_partial")
+        changes = [pts for pts, score in scores if score > 0.32]
+        for j, timestamp in enumerate(frame_times(timestamps, changes, frame_budget), 1):
             target = folder / f"frame-{n:02d}-{j:02d}.jpg"
-            command(["ffmpeg", "-nostdin", "-v", "error", "-ss", str(timestamp), "-protocol_whitelist", "file,pipe", "-i", str(path),
+            # FFmpeg rounds printed timestamps. Seek slightly before the frame.
+            seek = f"{max(0, timestamp - 0.001):.6f}"
+            command(["ffmpeg", "-nostdin", "-v", "error", "-ss", seek, "-protocol_whitelist", "file,pipe", "-i", str(path), "-map", "0:V:0",
                      "-frames:v", "1", "-vf", "scale=1600:1600:force_original_aspect_ratio=decrease", "-q:v", "3", "-threads", "1", str(target)], 10)
             if not target.is_file() or not 64 <= target.stat().st_size <= 1_800_000:
                 raise MediaError("media_partial")
