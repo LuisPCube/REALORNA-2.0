@@ -75,10 +75,10 @@ class MediaTests(unittest.TestCase):
         import requests
 
         url = "https://www.instagram.com/p/Fixture123/"
-        post = {"code": "Fixture123", "pk": "123", "media_type": 8, "carousel_media_count": 2,
-                "caption": {"text": "Fixture caption"}, "user": {"pk": "100", "username": "fixture"}}
-        post["carousel_media"] = [{"pk": str(n), "media_type": 1, "image_versions2": {"candidates": [
-            {"url": f"https://scontent.cdninstagram.com/slide-{n}.jpg", "width": 640, "height": 640},
+        post = {"code": "Fixture123", "media_type": 8, "carousel_media_count": 2,
+                "caption": {"text": "Fixture caption"}, "user": {"username": "fixture"}}
+        post["carousel_media"] = [{"media_type": 1, "image_versions2": {"candidates": [
+            {"url": f"https://scontent.cdninstagram.com/slide-{n}.jpg"},
         ]}} for n in (1, 2)]
         upstream = requests.Response()
         upstream.status_code = 403
@@ -99,6 +99,7 @@ class MediaTests(unittest.TestCase):
         self.assertEqual([item["url"].rsplit("/", 1)[-1] for item in entries], ["slide-1.jpg", "slide-2.jpg"])
         self.assertEqual(metadata["caption"], "Fixture caption")
         self.assertEqual(metadata["expected_items"], 2)
+        self.assertEqual(metadata["published_at"], "")
 
         for broken_post, code in [
             ({**post, "carousel_media_count": 3}, "media_partial"),
@@ -111,6 +112,19 @@ class MediaTests(unittest.TestCase):
                     patch.object(requests, "get", return_value=public_page(broken_post)), \
                     self.assertRaisesRegex(m.MediaError, code):
                 m.instagram_post_manifest(url)
+
+    def test_instagram_distinguishes_single_photo_and_video_preview(self):
+        photo = {"media_type": 1, "carousel_media": [], "carousel_media_count": 0, "image_versions2": {"candidates": [
+            {"url": "https://scontent.cdninstagram.com/single.jpg"},
+        ]}}
+        with patch.object(m, "instagram_public_product", return_value=photo):
+            entries, metadata = m.instagram_public_manifest("https://www.instagram.com/p/Fixture123/")
+        self.assertEqual(metadata["expected_items"], 1)
+        self.assertEqual(entries[0]["url"], "https://scontent.cdninstagram.com/single.jpg")
+        with patch.object(m, "instagram_public_product", return_value={**photo, "media_type": 2}), \
+                self.assertRaises(m.MediaError) as failure:
+            m.instagram_public_manifest("https://www.instagram.com/p/Fixture123/")
+        self.assertEqual(failure.exception.reason, "post_missing_media")
 
     def test_instagram_rate_limit_stops_before_second_guest_request(self):
         from gallery_dl import exception
