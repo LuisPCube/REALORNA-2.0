@@ -27,6 +27,8 @@ MAX_SECONDS = 300
 MAX_BYTES = 80_000_000
 MAX_TOTAL_BYTES = 150_000_000
 MAX_FRAMES = 24
+MAX_POST_PAGE_BYTES = 4_000_000
+POST_DATA_SCRIPT = re.compile(r"<script\b(?=[^>]*\sdata-sjs(?:\s|=|>))[^>]*>(.*?)</script\s*>", re.I | re.S)
 TIME_LIMIT = 100
 START = time.monotonic()
 
@@ -181,7 +183,7 @@ def date_text(value):
         return value.isoformat()
     return str(value or "")[:80]
 
-def gallery_manifest(url, platform):
+def gallery_manifest(url, platform, public_post=None):
     from gallery_dl import config, extractor
     from gallery_dl.extractor.message import Message
     config.clear()
@@ -194,24 +196,29 @@ def gallery_manifest(url, platform):
     config.set(("extractor", "twitter"), "quoted", False)
     config.set(("extractor", "twitter"), "retweets", False)
     config.set(("extractor", "twitter"), "videos", True)
-    if platform == "instagram":
-        # gallery-dl otherwise sets count AFTER skipping malformed slide data.
-        # Validate the original platform collection before that transformation.
-        from gallery_dl.extractor.instagram import InstagramExtractor
-        original_parse = InstagramExtractor._parse_post
-        def checked_parse(self, post):
-            original_items = post.get("carousel_media")
-            expected = int(post.get("carousel_media_count") or len(original_items or []) or 1)
-            if original_items is not None and len(original_items) != expected:
-                raise MediaError("media_partial")
-            parsed = original_parse(self, post)
-            if len(parsed.get("_files", [])) != expected:
-                raise MediaError("media_partial")
-            return parsed
-        InstagramExtractor._parse_post = checked_parse
     ext = extractor.find(url)
     if ext is None or ext.category not in (platform, "twitter") or ext.subcategory not in ("post", "tweet", "vmpost"):
         raise MediaError("media_unsupported")
+    if platform == "instagram":
+        # Check the source collection before the extractor can omit malformed items.
+        original_parse = ext._parse_post
+        def checked_parse(post):
+            original_items = post.get("carousel_media")
+            expected = int(post.get("carousel_media_count") or len(original_items or []) or 1)
+            if expected > MAX_ITEMS:
+                raise MediaError("media_limit")
+            if ((post.get("media_type") == 8 and not original_items) or
+                    (original_items is not None and len(original_items) != expected)):
+                raise MediaError("media_partial")
+            if any(item.get("media_type") == 2 and not item.get("video_versions") for item in original_items or [post]):
+                raise MediaError("media_partial")
+            parsed = original_parse(post)
+            if len(parsed.get("_files", [])) != expected:
+                raise MediaError("media_partial")
+            return parsed
+        ext._parse_post = checked_parse
+        if public_post is not None:
+            ext.posts = lambda: iter((public_post,))
     entries, meta = [], {}
     # Do not follow profile feeds, quoted posts, arbitrary queued extractors.
     for message in ext:
@@ -233,12 +240,12 @@ def gallery_manifest(url, platform):
         elif message[0] == Message.Queue:
             raise MediaError("media_partial")
     if not entries:
-        raise MediaError()
+        raise MediaError(reason="platform_empty_media")
     expected = int(meta.get("count") or entries[0]["info"].get("count") or 0)
     if not expected or expected != len(entries):
         raise MediaError("media_partial")
     if any(e["info"].get("user", {}).get("is_private") for e in entries):
-        raise MediaError()
+        raise MediaError(reason="platform_access_restricted")
     # Never silently drop/reorder a missing slide. Native indices are 1-based.
     indices = [int(e["info"].get("num") or n) for n, e in enumerate(entries, 1)]
     if indices != list(range(1, expected + 1)):
@@ -252,6 +259,83 @@ def gallery_manifest(url, platform):
         author = author.get("username") or author.get("name") or author.get("nick") or ""
     return entries, {"caption": caption, "title": caption[:220], "author": str(author or info.get("username") or info.get("fullname") or "")[:160],
                      "published_at": date_text(info.get("date")), "expected_items": expected}
+
+def instagram_public_product(url):
+    from gallery_dl.extractor.instagram import id_from_shortcode
+    import requests
+
+    shortcode = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1]
+    post_id = str(id_from_shortcode(shortcode)) if len(shortcode) <= 28 else None
+    remaining()
+    try:
+        with requests.get(url, headers={"Accept": "text/html"}, stream=True, timeout=(5, 10)) as response:
+            path = urlsplit(response.url).path
+            if "/accounts/login/" in path:
+                raise MediaError(reason="platform_login_required")
+            if "/challenge/" in path or "/checkpoint/" in path:
+                raise MediaError(reason="platform_access_restricted")
+            if not response.ok:
+                raise MediaError(reason=f"public_page_http_{response.status_code}")
+            if not re.fullmatch(rf"/(?:p|reels?|tv)/{re.escape(shortcode)}/?", path) or urlsplit(response.url).hostname != "www.instagram.com":
+                raise MediaError(reason="public_page_failed")
+            page = bytearray()
+            for chunk in response.iter_content(64 * 1024):
+                remaining()
+                page.extend(chunk)
+                if len(page) > MAX_POST_PAGE_BYTES:
+                    raise MediaError(reason="public_page_failed")
+    except requests.exceptions.RequestException as error:
+        raise MediaError(reason="public_page_network") from error
+
+    for script in POST_DATA_SCRIPT.finditer(page.decode("utf-8", errors="replace")):
+        try:
+            records = [json.loads(script.group(1))]
+        except (ValueError, RecursionError):
+            continue
+        while records:
+            record = records.pop()
+            if isinstance(record, dict):
+                media = record.get("xig_polaris_media")
+                post = media.get("if_not_gated_logged_out") if isinstance(media, dict) else None
+                if isinstance(post, dict) and (post.get("code") == shortcode or
+                        (not post.get("code") and post_id and str(post.get("pk")) == post_id)):
+                    owner = post.get("user")
+                    if isinstance(owner, dict) and owner.get("is_private"):
+                        raise MediaError(reason="platform_access_restricted")
+                    # Feed the exact public post to the same full-collection checks.
+                    post["code"] = shortcode
+                    post.setdefault("caption", None)
+                    return post
+                records.extend(record.values())
+            elif isinstance(record, list):
+                records.extend(record)
+    raise MediaError(reason="platform_empty_media")
+
+def instagram_post_manifest(url):
+    from gallery_dl import exception
+
+    try:
+        return gallery_manifest(url, "instagram")
+    except MediaError as error:
+        if error.code != "media_unavailable" or error.reason == "platform_access_restricted":
+            raise
+    except exception.ChallengeError as error:
+        raise MediaError(reason="platform_access_restricted") from error
+    except exception.HttpError as error:
+        if error.status == 429:
+            raise MediaError(reason="gallery_http_429") from error
+    except exception.AbortExtraction as error:
+        if str(error).startswith("HTTP redirect to challenge page"):
+            raise MediaError(reason="platform_access_restricted") from error
+    except (exception.ExtractionError, KeyError, ValueError, TypeError, socket.gaierror):
+        pass
+
+    # The post page can serve media publicly even when the metadata API fails.
+    product = instagram_public_product(url)
+    try:
+        return gallery_manifest(url, "instagram", public_post=product)
+    except (KeyError, ValueError, TypeError) as error:
+        raise MediaError("media_partial") from error
 
 def twitter_guest_manifest(url):
     # Fallback using yt-dlp's pinned GraphQL extractor. Syndication explicitly
@@ -300,21 +384,24 @@ def fetch_gallery(entries, folder):
     paths = []
     for n, entry in enumerate(entries, 1):
         remaining()
-        validate_remote(entry["url"])
         path = folder / f"source-{n:02d}.bin"
         # Only fixed headers; never accept arbitrary extractor Authorization.
-        with requests.get(entry["url"], headers={"User-Agent": "Mozilla/5.0"}, stream=True, timeout=(5, 10)) as response:
-            if not response.ok:
-                raise MediaError("media_partial")
-            size = 0
-            with path.open("wb") as target:
-                for chunk in response.iter_content(64 * 1024):
-                    remaining()
-                    size += len(chunk)
-                    total += len(chunk)
-                    if size > MAX_BYTES or total > MAX_TOTAL_BYTES:
-                        raise MediaError("media_limit")
-                    target.write(chunk)
+        try:
+            validate_remote(entry["url"])
+            with requests.get(entry["url"], headers={"User-Agent": "Mozilla/5.0"}, stream=True, timeout=(5, 10)) as response:
+                if not response.ok:
+                    raise MediaError("media_partial", f"download_http_{response.status_code}")
+                size = 0
+                with path.open("wb") as target:
+                    for chunk in response.iter_content(64 * 1024):
+                        remaining()
+                        size += len(chunk)
+                        total += len(chunk)
+                        if size > MAX_BYTES or total > MAX_TOTAL_BYTES:
+                            raise MediaError("media_limit")
+                        target.write(chunk)
+        except (requests.exceptions.RequestException, socket.gaierror) as error:
+            raise MediaError(reason="download_network") from error
         if size < 64:
             raise MediaError("media_partial")
         paths.append(path)
@@ -538,7 +625,10 @@ def main():
             remaining()
             entries, meta = twitter_guest_manifest(url)
         paths = fetch_gallery(entries, folder)
-    elif platform == "instagram" and "/p/" in url or platform == "tiktok" and "/photo/" in url:
+    elif platform == "instagram" and "/p/" in url:
+        entries, meta = instagram_post_manifest(url)
+        paths = fetch_gallery(entries, folder)
+    elif platform == "tiktok" and "/photo/" in url:
         entries, meta = gallery_manifest(url, platform)
         paths = fetch_gallery(entries, folder)
     else:

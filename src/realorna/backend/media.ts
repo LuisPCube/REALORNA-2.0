@@ -24,7 +24,7 @@ export type PreparedMedia = {
 };
 const mediaCodes = ["media_setup", "media_unavailable", "media_unsupported", "media_limit", "media_partial", "media_timeout"] as const;
 type MediaCode = (typeof mediaCodes)[number];
-const workerFailureReason = /^(?:(?:extractor|download)_(?:http_[45]\d{2}|network|failed)|platform_(?:region_restricted|login_required|empty_media|no_playable_formats|access_restricted))$/;
+const workerFailureReason = /^(?:(?:extractor|download|gallery|public_page)_(?:http_[45]\d{2}|network|failed)|platform_(?:region_restricted|login_required|empty_media|no_playable_formats|access_restricted))$/;
 
 function mediaFailure(code: MediaCode, reason: string) {
   return new CheckError(code, 0, "rate", { origin: "media", reason });

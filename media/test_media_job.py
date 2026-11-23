@@ -69,6 +69,61 @@ class MediaTests(unittest.TestCase):
     def test_missing_last_slide_reordered_slides_and_queued_posts_fail_closed(self):
         for options in [(3, 2, None, False), (3, 3, [1, 3, 2], False), (1, 1, None, True), (21, 21, None, False)]:
             with self.subTest(options=options), self.assertRaises(m.MediaError): self.fake_gallery(*options)
+    def test_instagram_uses_full_public_carousel_when_its_metadata_api_fails(self):
+        from gallery_dl import exception
+        from gallery_dl.extractor.instagram import InstagramAPI
+        import requests
+
+        url = "https://www.instagram.com/p/Fixture123/"
+        post = {"code": "Fixture123", "pk": "123", "media_type": 8, "carousel_media_count": 2,
+                "caption": {"text": "Fixture caption"}, "user": {"pk": "100", "username": "fixture"}}
+        post["carousel_media"] = [{"pk": str(n), "media_type": 1, "image_versions2": {"candidates": [
+            {"url": f"https://scontent.cdninstagram.com/slide-{n}.jpg", "width": 640, "height": 640},
+        ]}} for n in (1, 2)]
+        upstream = requests.Response()
+        upstream.status_code = 403
+
+        def public_page(product):
+            page = requests.Response()
+            page.url = url
+            page.status_code = 200
+            wrapper = {"result": {"data": {"xig_polaris_media": {"if_not_gated_logged_out": product}}}}
+            page._content = f'<script type="application/json" data-sjs>{json.dumps(wrapper)}</script>'.encode()
+            page._content_consumed = True
+            return page
+
+        with patch.object(InstagramAPI, "media", side_effect=exception.HttpError(response=upstream)), \
+                patch.object(requests, "get", return_value=public_page(post)) as fetch:
+            entries, metadata = m.instagram_post_manifest(url)
+        fetch.assert_called_once()
+        self.assertEqual([item["url"].rsplit("/", 1)[-1] for item in entries], ["slide-1.jpg", "slide-2.jpg"])
+        self.assertEqual(metadata["caption"], "Fixture caption")
+        self.assertEqual(metadata["expected_items"], 2)
+
+        for broken_post, code in [
+            ({**post, "carousel_media_count": 3}, "media_partial"),
+            ({**post, "code": "DifferentPost"}, "media_unavailable"),
+            ({**post, "user": {"is_private": True}}, "media_unavailable"),
+            (None, "media_unavailable"),
+        ]:
+            with self.subTest(post=broken_post), \
+                    patch.object(InstagramAPI, "media", side_effect=exception.HttpError(response=upstream)), \
+                    patch.object(requests, "get", return_value=public_page(broken_post)), \
+                    self.assertRaisesRegex(m.MediaError, code):
+                m.instagram_post_manifest(url)
+
+    def test_instagram_rate_limit_stops_before_second_guest_request(self):
+        from gallery_dl import exception
+        import requests
+
+        response = requests.Response()
+        response.status_code = 429
+        with patch.object(m, "gallery_manifest", side_effect=exception.HttpError(response=response)), \
+                patch.object(m, "instagram_public_product") as fetch, self.assertRaises(m.MediaError) as failure:
+            m.instagram_post_manifest("https://www.instagram.com/p/Fixture123/")
+        self.assertEqual(failure.exception.reason, "gallery_http_429")
+        fetch.assert_not_called()
+
     def test_real_ffmpeg_audio_frames_and_two_slides(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
