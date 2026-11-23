@@ -3,7 +3,7 @@ import type { Lang } from "./types";
 const en = {
   retry_check: "Retry for free", retry_wait: "Retry in {seconds}s",
   retry_free_note: "Your retry is saved for this link and plan. No additional attempt is needed.",
-  published_at: "Published", scan_note: "A check can take up to two minutes, including any wait for AI capacity. Keep this page open; the result appears when verification finishes.",
+  published_at: "Published", scan_note: "A check can take a few minutes, including any wait for AI capacity. Keep this page open until the result appears.",
   media_limits_note: "Public media only. Maximum 5 minutes of video and 20 post items. Platform access restrictions may prevent a check.",
   stage_reading: "Reading the submitted link…",
   stage_downloading: "Downloading the public post and its media…",
@@ -191,7 +191,7 @@ const en = {
 const id: Record<keyof typeof en, string> = {
   retry_check: "Coba lagi gratis", retry_wait: "Coba lagi dalam {seconds} dtk",
   retry_free_note: "Coba ulang tautan ini dengan paket yang sama. Tidak memakai kesempatan tambahan.",
-  published_at: "Terbit", scan_note: "Pemeriksaan bisa memerlukan hingga dua menit, termasuk waktu menunggu giliran AI. Biarkan halaman terbuka; hasil muncul setelah verifikasi selesai.",
+  published_at: "Terbit", scan_note: "Pemeriksaan bisa memakan beberapa menit, termasuk waktu menunggu giliran AI. Biarkan halaman tetap terbuka sampai hasilnya muncul.",
   media_limits_note: "Hanya media publik. Maksimal total video 5 menit dan 20 item unggahan. Pembatasan akses platform dapat menghalangi pemeriksaan.",
   stage_reading: "Membaca tautan yang dikirim…",
   stage_downloading: "Mengunduh unggahan publik dan medianya…",
