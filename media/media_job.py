@@ -356,8 +356,9 @@ def ytdlp_download(url, folder):
                 raise MediaError("media_limit")
             if item.get("availability") in ("private", "premium_only", "subscriber_only", "needs_auth"):
                 raise MediaError()
-            duration = item.get("duration")
-            if duration is None or not 0 < float(duration) <= MAX_SECONDS:
+            # Public video metadata can omit duration; prepare() verifies the file with ffprobe.
+            duration = float(item.get("duration") or 0)
+            if not 0 <= duration <= MAX_SECONDS:
                 raise MediaError("media_limit")
             if item.get("ext") in ("mhtml", "html"):
                 raise MediaError("media_partial")
