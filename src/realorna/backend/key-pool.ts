@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { acquireAiSlot, disableKey, keyIsDisabled, releaseAiSlot, REQUEST_TIMEOUT_MS } from "./ai-throttle";
 import { exponentialDelay, aiRateSettings, AiRateLimitError, providerRetryInfo } from "./ai-rate-policy";
-import { AiServiceError, providerDiagnostic } from "./ai-errors";
+import { AiServiceError, providerDiagnostic, type AiOperation } from "./ai-errors";
 export { AiRateLimitError } from "./ai-rate-policy";
 // Ordered failover for rejected credentials; 429 never immediately hops keys.
 // All calls, including transcription, use the shared Postgres request gate.
@@ -18,24 +18,34 @@ export function openaiKeys(): string[] {
   return [...new Set(values.filter((v): v is string => typeof v === "string").map(v => v.trim()).filter(Boolean))].slice(0, 12);
 }
 export function hasOpenAIKeys() { return openaiKeys().length > 0; }
-export async function withOpenAIKey(call: (key: string, signal: AbortSignal, clientRequestId: string) => Promise<Response>, deadline: number): Promise<Response> {
+export async function withOpenAIKey(
+  call: (key: string, signal: AbortSignal, clientRequestId: string) => Promise<Response>,
+  deadline: number,
+  { operation, timeoutMs = REQUEST_TIMEOUT_MS }: { operation?: AiOperation; timeoutMs?: number } = {},
+): Promise<Response> {
   const keys = openaiKeys();
   if (!keys.length) throw new Error("openai_off");
   const settings = aiRateSettings();
   let keyIndex = 0;
-  let lastError: Error = new AiServiceError("ai_failed", { origin: "transport" });
+  let lastError: Error = new AiServiceError("ai_failed", { origin: "transport", operation });
+  const deadlineExceeded = () => new AiServiceError("ai_timeout", {
+    origin: "deadline", reason: "request_budget_exhausted", operation, deadline_remaining_ms: Math.max(0, deadline - Date.now()),
+  });
   for (let attempt = 0; attempt < settings.maxAttempts; attempt++) {
     while (keyIndex < keys.length && await keyIsDisabled(keys[keyIndex])) keyIndex++;
     if (keyIndex >= keys.length) throw lastError instanceof AiServiceError && lastError.code === "ai_unavailable"
-      ? lastError : new AiServiceError("ai_unavailable", { origin: "app_cooldown", reason: "credentials_disabled" });
+      ? lastError : new AiServiceError("ai_unavailable", { origin: "app_cooldown", reason: "credentials_disabled", operation });
     const key = keys[keyIndex];
     const remaining = deadline - Date.now();
-    if (remaining < 500) throw attempt ? lastError : new AiServiceError("ai_timeout", { origin: "deadline" });
+    if (remaining <= 500) throw attempt ? lastError : deadlineExceeded();
     let lease;
-    try { lease = await acquireAiSlot(deadline); }
+    try { lease = await acquireAiSlot(deadline, timeoutMs); }
     catch (error) {
       // A retry waiting for capacity must not disguise the failure that caused it.
       if (attempt > 0 && error instanceof AiRateLimitError && error.reason === "busy") throw lastError;
+      if (error instanceof AiRateLimitError || error instanceof AiServiceError) {
+        error.diagnostic = { ...error.diagnostic, operation, deadline_remaining_ms: Math.max(0, deadline - Date.now()) };
+      }
       throw error;
     }
     let released = false;
@@ -45,7 +55,14 @@ export async function withOpenAIKey(call: (key: string, signal: AbortSignal, cli
     };
     try {
       const clientRequestId = randomUUID();
-      const signal = AbortSignal.timeout(Math.max(1, Math.min(REQUEST_TIMEOUT_MS, deadline - Date.now() - 500)));
+      const startedAt = Date.now();
+      const requestTimeoutMs = Math.min(timeoutMs, deadline - startedAt - 500);
+      if (requestTimeoutMs <= 0) throw attempt ? lastError : deadlineExceeded();
+      const signal = AbortSignal.timeout(requestTimeoutMs);
+      const timing = () => {
+        const now = Date.now();
+        return { operation, elapsed_ms: now - startedAt, timeout_ms: requestTimeoutMs, deadline_remaining_ms: Math.max(0, deadline - now) };
+      };
       let upstream: Response | undefined;
       let response: Response;
       try {
@@ -54,9 +71,9 @@ export async function withOpenAIKey(call: (key: string, signal: AbortSignal, cli
         response = new Response(body, { status: upstream.status, statusText: upstream.statusText, headers: upstream.headers });
       } catch (error) {
         const timedOut = signal.aborted || error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name);
-        await release(timedOut ? {} : { delayMs: exponentialDelay(lease.failures, settings.retryBaseMs), reason: "busy" });
         const diagnostic = { ...providerDiagnostic(upstream, undefined, clientRequestId), origin: "transport" as const,
-          reason: timedOut ? "request_timeout" : "connection_failed" };
+          reason: timedOut ? "request_timeout" : "connection_failed", ...timing() };
+        await release(timedOut ? {} : { delayMs: exponentialDelay(lease.failures, settings.retryBaseMs), reason: "busy" });
         // A timed-out POST may already have been processed. Do not silently duplicate it.
         if (timedOut) throw new AiServiceError("ai_timeout", diagnostic);
         lastError = new AiServiceError("ai_failed", diagnostic);
@@ -64,7 +81,7 @@ export async function withOpenAIKey(call: (key: string, signal: AbortSignal, cli
       }
       const details = response.ok ? {} : await response.clone().json().catch(() => ({}));
       const info = providerRetryInfo(response, details);
-      const diagnostic = providerDiagnostic(response, details, clientRequestId);
+      const diagnostic = { ...providerDiagnostic(response, details, clientRequestId), ...timing() };
       if (response.status === 429 && info.quotaExhausted) {
         // Preserve real provider hints, but never invent a billing reset time.
         await release({ delayMs: info.delayMs, reason: "quota" });

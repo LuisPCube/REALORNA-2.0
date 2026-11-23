@@ -7,7 +7,7 @@ if (process.env.DATABASE_URL?.trim() || process.env.VERCEL) throw new Error('Run
 process.env.OPENAI_API_KEYS = 'fixture-key'; delete process.env.OPENAI_API_KEY;
 for (const key of ['OPENAI_TEXT_MODEL','OPENAI_MEDIA_MODEL','OPENAI_VIDEO_MODEL','OPENAI_TRANSCRIBE_MODEL','OPENAI_REGULAR_MODEL']) delete process.env[key];
 process.env.OPENAI_ADVANCE_MODEL = 'legacy-sol-must-be-ignored';
-process.env.OPENAI_MIN_INTERVAL_MS = '1000'; process.env.OPENAI_MAX_QUEUE_WAIT_MS = '2000';
+process.env.OPENAI_MIN_INTERVAL_MS = '1000'; process.env.OPENAI_MAX_QUEUE_WAIT_MS = '5000';
 const folder = await mkdtemp(join(tmpdir(), 'realorna-media-fixture-'));
 const python = process.env.MEDIA_PYTHON || resolve('.media-venv/bin/python3');
 process.env.MEDIA_PYTHON = python;
@@ -96,6 +96,72 @@ try {
   const token=await media.acquireMediaSlot();await assert.rejects(()=>media.acquireMediaSlot(),e=>e.code==='ai_busy'&&e.retryAfterSeconds===3);
   await media.releaseMediaSlot('stale-token');await assert.rejects(()=>media.acquireMediaSlot(),e=>e.code==='ai_busy');
   await media.releaseMediaSlot(token);const next=await media.acquireMediaSlot();assert.notEqual(next,token);await media.releaseMediaSlot(next);
+ });
+ await test('A timed-out verification saves its inputs and the original attempt resumes without another download or transcription', async () => {
+  const user = { id: 'media-retry-user', username: 'media-retry-user', email: 'retry@example.invalid', admin: false };
+  await sql.query('insert into "user" (id,name,email,"emailVerified",username,"displayUsername") values ($1,$1,$2,true,$1,$1)', [user.id, user.email]);
+  const attempt = await orders.grantAttempt({ id: 'media-fixture-admin' }, user.username, 'advance', crypto.randomUUID());
+  const url = 'https://www.instagram.com/reel/resumefixture/';
+  const order = await orders.createCheck(user, { url, plan: 'advance', lang: 'id', key: crypto.randomUUID(), attemptId: attempt.attempt_id });
+  const calls = [];
+  let originalVerification;
+  globalThis.fetch = async (endpoint, options) => {
+   calls.push(String(endpoint).split('/').at(-1));
+   if (String(endpoint).endsWith('/transcriptions')) return new Response(JSON.stringify({ text: 'Saved synthetic speech.' }));
+   originalVerification = JSON.parse(options.body).input[0].content;
+   const [state] = await sql`select extract(epoch from (lease_until - clock_timestamp())) as lease_seconds from fact_ai_throttle where scope = 'openai'`;
+   assert.ok(state.lease_seconds > 120 && state.lease_seconds <= 130);
+   return new Response(JSON.stringify({ error: { code: 'request_timeout' } }), { status: 408 });
+  };
+  await assert.rejects(() => flow.retryCheck(order.order_id), error => {
+   assert.equal(error.code, 'ai_timeout');
+   assert.equal(error.diagnostic.operation, 'verification');
+   assert.equal(error.diagnostic.provider_status, 408);
+   assert.equal(error.diagnostic.timeout_ms, 120_000);
+   return true;
+  });
+  const [saved] = await sql`select payload, expires_at > now() as fresh from fact_media_checkpoints where order_id = ${order.order_id}`;
+  assert.equal(saved.fresh, true);
+  assert.equal(JSON.parse(saved.payload).media.audio, undefined);
+  assert.equal((await orders.getOrder(order.order_id)).status, 'failed');
+
+  const worker = process.env.MEDIA_SCRIPT_PATH;
+  process.env.MEDIA_SCRIPT_PATH = join(folder, 'unavailable-worker.py');
+  try {
+   globalThis.fetch = async (endpoint, options) => {
+    calls.push(String(endpoint).split('/').at(-1));
+    assert.ok(String(endpoint).endsWith('/responses'));
+    const content = JSON.parse(options.body).input[0].content;
+    assert.match(content[0].text, /Saved synthetic speech\./);
+    assert.deepEqual(content.slice(1), originalVerification.slice(1));
+    return provider();
+   };
+   const result = await flow.retryCheck(order.order_id);
+   assert.equal(result.order.status, 'processed');
+   assert.equal(result.report.coverage.transcribed_tracks, 1);
+   assert.deepEqual(calls, ['transcriptions', 'responses', 'responses']);
+   assert.equal((await sql`select 1 from fact_media_checkpoints where order_id = ${order.order_id}`).length, 0);
+   assert.deepEqual(await sql`select status, used_order_id from fact_attempts where user_id = ${user.id}`,
+    [{ status: 'used', used_order_id: order.order_id }]);
+  } finally { process.env.MEDIA_SCRIPT_PATH = worker; }
+ });
+ await test('Checkpoint reads expire inputs and respect claim tokens and the resolved URL', async () => {
+  const checkpoints = await server.ssrLoadModule('/src/realorna/backend/media-checkpoints.ts');
+  const account = { id: 'media-fixture-admin', admin: true };
+  const url = 'https://www.instagram.com/reel/expiryfixture/';
+  const order = await orders.createCheck(account, { url, plan: 'advance', lang: 'id', key: crypto.randomUUID() });
+  const claim = await orders.claimRetry(order.order_id);
+  const { audio: _, ...input } = await media.prepareMedia(url, Date.now() + 270_000);
+  const stale = { order_id: order.order_id, claim_token: 'stale-token' };
+  await checkpoints.saveMediaCheckpoint(stale, url, { ...input, transcripts: ['stale input'] });
+  assert.equal(await checkpoints.readMediaCheckpoint(claim, url), null);
+  await checkpoints.saveMediaCheckpoint(claim, url, { ...input, transcripts: ['fixture'] });
+  assert.equal(await checkpoints.readMediaCheckpoint(stale, url), null);
+  assert.equal(await checkpoints.readMediaCheckpoint(claim, 'https://www.instagram.com/reel/different/'), null);
+  assert.deepEqual((await checkpoints.readMediaCheckpoint(claim, url)).transcripts, ['fixture']);
+  await sql`update fact_media_checkpoints set expires_at = now() - interval '1 second' where order_id = ${order.order_id}`;
+  assert.equal(await checkpoints.readMediaCheckpoint(claim, url), null);
+  assert.equal((await sql`select 1 from fact_media_checkpoints where order_id = ${order.order_id}`).length, 0);
  });
  await test('Report coverage, real progress and media failures render in both languages',async()=>{
   for(const lang of ['en','id']){const t=(k,p)=>translate(lang,k,p);

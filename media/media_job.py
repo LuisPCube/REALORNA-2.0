@@ -31,8 +31,9 @@ TIME_LIMIT = 100
 START = time.monotonic()
 
 class MediaError(Exception):
-    def __init__(self, code="media_unavailable"):
+    def __init__(self, code="media_unavailable", reason=None):
         self.code = code
+        self.reason = reason
         super().__init__(code)
 
 def emit(**data):
@@ -319,8 +320,33 @@ def fetch_gallery(entries, folder):
         paths.append(path)
     return paths
 
+def ytdlp_failure(error, phase):
+    from yt_dlp.networking.exceptions import HTTPError, TransportError
+    from yt_dlp.utils import DownloadError, ExtractorError, GeoRestrictedError
+
+    if isinstance(error, DownloadError) and error.exc_info and error.exc_info[1]:
+        error = error.exc_info[1]
+    if isinstance(error, GeoRestrictedError):
+        return MediaError(reason="platform_region_restricted")
+    if isinstance(error, ExtractorError):
+        if error.orig_msg.startswith("The webpage request was redirected to the login page"):
+            return MediaError(reason="platform_login_required")
+        if error.orig_msg.startswith("Instagram sent an empty media response"):
+            return MediaError(reason="platform_empty_media")
+        if error.orig_msg.startswith(("Requested format is not available", "No video formats found", "There is no video in this post")):
+            return MediaError(reason="platform_no_playable_formats")
+        error = error.cause or error
+    if isinstance(error, HTTPError) and 400 <= error.status < 600:
+        return MediaError(reason=f"{phase}_http_{error.status}")
+    if isinstance(error, (TransportError, socket.gaierror)):
+        return MediaError(reason=f"{phase}_network")
+    return MediaError(reason=f"{phase}_failed")
+
 def ytdlp_download(url, folder):
     import yt_dlp
+    from yt_dlp.networking.exceptions import RequestError
+    from yt_dlp.utils import YoutubeDLError
+
     downloaded = []
     total = [0]
     def progress(data):
@@ -330,7 +356,8 @@ def ytdlp_download(url, folder):
     options = {
         "quiet": True, "no_warnings": True, "logger": QuietLogger(),
         "noplaylist": True, "extract_flat": False, "ignoreerrors": False,
-        "socket_timeout": 10, "retries": 0, "fragment_retries": 0,
+        "socket_timeout": 10, "retries": 1, "fragment_retries": 1,
+        "skip_unavailable_fragments": False,
         "concurrent_fragment_downloads": 1,
         "js_runtimes": {"node": {}},
         "format": "bv*[height<=720]+ba/b[height<=720]/b",
@@ -344,9 +371,12 @@ def ytdlp_download(url, folder):
         "overwrites": False, "writethumbnail": False,
     }
     with yt_dlp.YoutubeDL(options) as ydl:
-        info = ydl.extract_info(url, download=False)
+        try:
+            info = ydl.extract_info(url, download=False)
+        except (YoutubeDLError, RequestError, socket.gaierror) as error:
+            raise ytdlp_failure(error, "extractor") from error
         if not info:
-            raise MediaError()
+            raise MediaError(reason="platform_empty_media")
         raw = list(info.get("entries") or [info])
         if not raw or len(raw) > MAX_VIDEOS:
             raise MediaError("media_limit")
@@ -356,7 +386,7 @@ def ytdlp_download(url, folder):
             if not item or item.get("is_live") or item.get("live_status") in ("is_live", "is_upcoming", "post_live"):
                 raise MediaError("media_limit")
             if item.get("availability") in ("private", "premium_only", "subscriber_only", "needs_auth"):
-                raise MediaError()
+                raise MediaError(reason="platform_access_restricted")
             # Public video metadata can omit duration; prepare() verifies the file with ffprobe.
             duration = float(item.get("duration") or 0)
             if not 0 <= duration <= MAX_SECONDS:
@@ -372,7 +402,10 @@ def ytdlp_download(url, folder):
                 raise MediaError("media_partial")
             for f in item.get("requested_formats") or [item]:
                 validate_remote(f.get("url", ""))
-            ydl.process_info(item)
+            try:
+                ydl.process_info(item)
+            except (YoutubeDLError, RequestError, socket.gaierror) as error:
+                raise ytdlp_failure(error, "download") from error
             filename = item.get("filepath") or item.get("_filename") or ydl.prepare_filename(item)
             path = Path(filename).resolve()
             if not path.is_relative_to(folder.resolve()):
@@ -520,7 +553,7 @@ if __name__ == "__main__":
     try:
         main()
     except MediaError as error:
-        emit(ok=False, error=error.code)
+        emit(ok=False, error=error.code, reason=error.reason)
         sys.exit(2)
     except ModuleNotFoundError:
         emit(ok=False, error="media_setup")

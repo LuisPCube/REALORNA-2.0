@@ -7,6 +7,8 @@ import { GPT_6_2_SOL, modelForContent, type ContentType } from "./models";
 import type { VisualInput } from "./media";
 import { AiServiceError, providerDiagnostic, type AiDiagnostic } from "./ai-errors";
 
+const VIDEO_VERIFICATION_TIMEOUT_MS = 120_000;
+
 const ClaimSchema = z.object({
   text: z.string(), status: z.enum(["benar", "salah", "keliru", "belum_jelas"]),
   explanation: z.string(), correction: z.string(), importance: z.enum(["utama", "detail"]),
@@ -68,9 +70,10 @@ export function extractResponse(data: ResponseData, diagnostic: AiDiagnostic = {
 
 export async function askOpenAI(user: string, plan: Plan, deadline = Date.now() + 100_000, media?: { type: ContentType; images: VisualInput[] }) {
   const contentType = media?.type || "article";
+  const operation = "verification" as const;
   const model = modelForContent(contentType);
   if (contentType !== "article" && plan !== "advance") {
-    throw new AiServiceError("ai_unavailable", { origin: "configuration", reason: "media_plan" });
+    throw new AiServiceError("ai_unavailable", { origin: "configuration", reason: "media_plan", operation });
   }
   const usesSol = model === GPT_6_2_SOL || model.startsWith(`${GPT_6_2_SOL}-`);
   const reasoning = usesSol && contentType !== "media"
@@ -91,13 +94,13 @@ export async function askOpenAI(user: string, plan: Plan, deadline = Date.now() 
       max_tool_calls: 6, include: ["web_search_call.action.sources"], max_output_tokens: 7000,
       text: { format: { type: "json_schema", name: "realorna_fact_check", strict: true, schema } },
     }), signal,
-  }), deadline);
+  }), deadline, { operation, timeoutMs: contentType === "video" ? VIDEO_VERIFICATION_TIMEOUT_MS : undefined });
   if (!response.ok) throw new AiServiceError([400, 401, 403, 404].includes(response.status) ? "ai_unavailable" : "ai_failed",
-    providerDiagnostic(response, await response.clone().json().catch(() => ({}))));
+    { ...providerDiagnostic(response, await response.clone().json().catch(() => ({}))), operation });
   let data: ResponseData;
   try { data = await response.json() as ResponseData; }
-  catch { throw new AiServiceError("ai_failed", { ...providerDiagnostic(response), reason: "invalid_json" }); }
-  return extractResponse(data, providerDiagnostic(response));
+  catch { throw new AiServiceError("ai_failed", { ...providerDiagnostic(response), operation, reason: "invalid_json" }); }
+  return extractResponse(data, { ...providerDiagnostic(response), operation });
 }
 
 const MEDIA_EXT: Record<string, string> = {
@@ -105,21 +108,22 @@ const MEDIA_EXT: Record<string, string> = {
   "audio/wav": "wav", "audio/x-wav": "wav", "video/webm": "webm", "audio/webm": "webm",
 };
 export async function transcribeWithOpenAI(media: { mime: string; bytes: Uint8Array }, deadline = Date.now() + 90_000): Promise<string | null> {
+  const operation = "transcription" as const;
   const model = process.env.OPENAI_TRANSCRIBE_MODEL?.trim() || "gpt-transcribe";
   const ext = MEDIA_EXT[media.mime];
-  if (!hasOpenAIKeys() || !ext || !media.bytes.length || media.bytes.length > 6_000_000) throw new AiServiceError("ai_unavailable", { origin: "configuration", reason: "transcription_input" });
+  if (!hasOpenAIKeys() || !ext || !media.bytes.length || media.bytes.length > 6_000_000) throw new AiServiceError("ai_unavailable", { origin: "configuration", reason: "transcription_input", operation });
   const response = await withOpenAIKey((key, signal, requestId) => {
     const body = new FormData();
     body.set("model", model);
     body.set("file", new Blob([new Uint8Array(media.bytes)], { type: media.mime }), `speech.${ext}`);
     return fetch("https://api.openai.com/v1/audio/transcriptions", { method: "POST", headers: { Authorization: `Bearer ${key}`, "X-Client-Request-Id": requestId }, body, signal });
-  }, deadline);
+  }, deadline, { operation });
   if (!response.ok) throw new AiServiceError([400, 401, 403, 404].includes(response.status) ? "ai_unavailable" : "ai_failed",
-    providerDiagnostic(response, await response.clone().json().catch(() => ({}))));
+    { ...providerDiagnostic(response, await response.clone().json().catch(() => ({}))), operation });
   let data: { text?: unknown };
   try { data = await response.json(); }
-  catch { throw new AiServiceError("ai_failed", { ...providerDiagnostic(response), reason: "transcription_invalid_json" }); }
-  if (typeof data.text !== "string" || data.text.length > 64000) throw new AiServiceError("ai_failed", { ...providerDiagnostic(response), reason: "transcription_incomplete" });
+  catch { throw new AiServiceError("ai_failed", { ...providerDiagnostic(response), operation, reason: "transcription_invalid_json" }); }
+  if (typeof data.text !== "string" || data.text.length > 64000) throw new AiServiceError("ai_failed", { ...providerDiagnostic(response), operation, reason: "transcription_incomplete" });
   // Empty transcript is explicitly recorded as no speech. Never replace an API
   // failure with a caption-only result. ASR may still mishear words/numbers.
   return data.text.trim() || null;

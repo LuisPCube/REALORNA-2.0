@@ -130,12 +130,17 @@ try {
   });
   await test("A timed-out POST releases the slot and stops without silently repeating the request", async () => {
     let calls = 0; let failure;
-    try { await pool.withOpenAIKey(async () => { calls++; throw new DOMException("fixture-private-data", "TimeoutError"); }, Date.now() + 5000); }
+    try { await pool.withOpenAIKey(async () => { calls++; throw new DOMException("fixture-private-data", "TimeoutError"); }, Date.now() + 5000,
+      { operation: "transcription" }); }
     catch (error) { failure = errors.asCheckError(error); }
     assert.equal(calls, 1); assert.equal(failure.code, "ai_timeout");
     const response = errors.checkErrorResponse(failure); const body = await response.json();
     assert.equal(response.status, 504); assert.equal(body.error_origin, "transport");
     assert.equal(body.diagnostic_reason, "request_timeout"); assert.equal(response.headers.get("Retry-After"), null);
+    assert.equal(body.ai_operation, "transcription");
+    assert.ok(body.elapsed_ms >= 0);
+    assert.ok(body.timeout_ms > 0 && body.timeout_ms <= 4500);
+    assert.ok(body.deadline_remaining_ms <= 5000);
     assert.doesNotMatch(JSON.stringify(body), /fixture-private-data|fixture-first/);
     const [state] = await sql`select lease_id from fact_ai_throttle`; assert.equal(state.lease_id, null);
   });

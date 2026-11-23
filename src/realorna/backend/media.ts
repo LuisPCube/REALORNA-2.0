@@ -24,6 +24,7 @@ export type PreparedMedia = {
 };
 const mediaCodes = ["media_setup", "media_unavailable", "media_unsupported", "media_limit", "media_partial", "media_timeout"] as const;
 type MediaCode = (typeof mediaCodes)[number];
+const workerFailureReason = /^(?:(?:extractor|download)_(?:http_[45]\d{2}|network|failed)|platform_(?:region_restricted|login_required|empty_media|no_playable_formats|access_restricted))$/;
 
 function mediaFailure(code: MediaCode, reason: string) {
   return new CheckError(code, 0, "rate", { origin: "media", reason });
@@ -88,7 +89,8 @@ async function runWorker(input: Record<string, unknown>, timeout: number, onStag
         if (!last) return reject(mediaFailure("media_setup", workerStage ?? "worker_startup"));
         if (last.ok !== true) {
           const code = mediaCodes.find(code => code === last?.error) || "media_unavailable";
-          return reject(mediaFailure(code, workerStage ?? "worker_startup"));
+          const reason = typeof last.reason === "string" && workerFailureReason.test(last.reason) ? last.reason : workerStage;
+          return reject(mediaFailure(code, reason ?? "worker_startup"));
         }
         resolve(last);
       }).catch(() => reject(mediaFailure("media_unavailable", "progress_update")));

@@ -9,7 +9,7 @@ export { REQUEST_TIMEOUT_MS };
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 export type AiLease = { id: string; failures: number };
 
-export async function acquireAiSlot(deadline: number): Promise<AiLease> {
+export async function acquireAiSlot(deadline: number, requestTimeoutMs = REQUEST_TIMEOUT_MS): Promise<AiLease> {
   const sql = await getSql();
   const settings = aiRateSettings();
   const queueDeadline = Math.min(deadline - 500, Date.now() + settings.maxQueueMs);
@@ -22,7 +22,7 @@ export async function acquireAiSlot(deadline: number): Promise<AiLease> {
           next_request_at = clock_timestamp() + ($3::int * interval '1 millisecond')
       where scope = $1 and next_request_at <= clock_timestamp() and blocked_until <= clock_timestamp()
         and (lease_until is null or lease_until <= clock_timestamp())
-      returning failure_count`, [SCOPE, id, settings.intervalMs, Math.min(REQUEST_TIMEOUT_MS, Math.max(1, deadline - Date.now())) + 10_000]);
+      returning failure_count`, [SCOPE, id, settings.intervalMs, Math.min(requestTimeoutMs, Math.max(1, deadline - Date.now())) + 10_000]);
     if (rows[0]) return { id, failures: Number(rows[0].failure_count) };
     const [state] = await sql.query<{ wait_ms: string | number; busy_ms: string | number; cooldown_ms: string | number; block_reason: RateReason }>(`select
       greatest(0, ceil(extract(epoch from (greatest(next_request_at, blocked_until) - clock_timestamp())) * 1000)) as wait_ms,

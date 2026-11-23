@@ -32,6 +32,8 @@ export function checkErrorResponse(error: CheckError) {
     error: error.code, support_id: supportId,
     ...(retry ? { retry_after_seconds: Math.ceil(error.retryAfterSeconds), retry_reason: error.retryReason } : {}),
     ...(diagnostic ? { error_origin: diagnostic.origin, diagnostic_reason: diagnostic.reason,
+      ai_operation: diagnostic.operation, elapsed_ms: diagnostic.elapsed_ms, timeout_ms: diagnostic.timeout_ms,
+      deadline_remaining_ms: diagnostic.deadline_remaining_ms,
       provider_status: diagnostic.provider_status, provider_code: diagnostic.provider_code,
       provider_request_id: diagnostic.provider_request_id, client_request_id: diagnostic.client_request_id } : {}),
   };

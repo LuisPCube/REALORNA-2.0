@@ -1,6 +1,12 @@
+export type AiOperation = "transcription" | "verification";
+
 export type AiDiagnostic = {
   origin: "openai" | "media" | "transport" | "app_queue" | "app_pacing" | "app_cooldown" | "deadline" | "saved_check" | "configuration";
   reason?: string;
+  operation?: AiOperation;
+  elapsed_ms?: number;
+  timeout_ms?: number;
+  deadline_remaining_ms?: number;
   provider_status?: number;
   provider_code?: string;
   provider_request_id?: string;

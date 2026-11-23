@@ -78,9 +78,15 @@ export async function updateProgress(orderId: string, token: string | null, stag
 }
 export async function markProcessed(orderId: string, contract: FactContract, report: FactOk, token: string | null) {
   const sql = await getSql();
-  await sql.query(`update fact_checks set stored_status = 'processed', progress_stage = null, result_json = $2, report_json = $3, error = null,
-    claim_token = null, retry_after_at = null, updated_at = now() where order_id = $1 and status = 'processing' and claim_token = $4`,
+  const rows = await sql.query(`with finished as (
+    update fact_checks set stored_status = 'processed', progress_stage = null, result_json = $2, report_json = $3, error = null,
+      claim_token = null, retry_after_at = null, updated_at = now()
+      where order_id = $1 and status = 'processing' and claim_token = $4 returning order_id
+  ), cleared as (
+    delete from fact_media_checkpoints c using finished f where c.order_id = f.order_id
+  ) select order_id from finished`,
     [orderId, JSON.stringify(contract), JSON.stringify(report), token]);
+  if (!rows.length) throw new ApiError("processing_claim_lost", 409);
 }
 export async function markFailed(orderId: string, error: string, token: string | null, retryAfterSeconds = 0) {
   const sql = await getSql();

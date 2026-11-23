@@ -7,7 +7,8 @@ import { AiRateLimitError, hasOpenAIKeys } from "./key-pool";
 import { AiServiceError } from "./ai-errors";
 import { CheckError, asCheckError } from "./check-errors";
 export { CheckError } from "./check-errors";
-import { prepareMedia, type PreparedMedia } from "./media";
+import { prepareMedia } from "./media";
+import { readMediaCheckpoint, saveMediaCheckpoint, type CheckClaim, type MediaVerificationInput } from "./media-checkpoints";
 import type { Transcript } from "./transcript";
 import {
   claimRetry,
@@ -86,7 +87,11 @@ function userPrompt(input: {
     .join("\n");
 }
 
-export async function checkOrder(order: { url: string; plan: Plan; lang: Lang }, onStage: (stage: CheckStage) => Promise<void> = async () => {}) {
+export async function checkOrder(
+  order: { url: string; plan: Plan; lang: Lang },
+  onStage: (stage: CheckStage) => Promise<void> = async () => {},
+  claim?: CheckClaim,
+) {
   const u = parseLink(order.url);
   if (!u) throw new CheckError("invalid");
   if (!(await isPublicHost(u.hostname))) throw new CheckError("invalid");
@@ -107,9 +112,10 @@ export async function checkOrder(order: { url: string; plan: Plan; lang: Lang },
 
   if (!hasOpenAIKeys()) throw new CheckError("ai_unavailable");
   // Bound the entire operation, including media and pacing, for serverless use.
-  const deadline = Date.now() + (inspected.video ? 270_000 : 120_000);
+  const startedAt = Date.now();
+  const mediaDeadline = startedAt + 270_000;
   await onStage("reading");
-  if (inspected.video) return checkMediaOrder(order, u.toString(), deadline, onStage);
+  if (inspected.video) return checkMediaOrder(order, u.toString(), mediaDeadline, onStage, claim);
 
   const [fetched, embed] = await Promise.all([
     safeFetch(u.toString()),
@@ -147,7 +153,7 @@ export async function checkOrder(order: { url: string; plan: Plan; lang: Lang },
 
   const bits = fetched.ok ? pageBits(fetched.body) : null;
   const transcript: Transcript | null = null;
-  if (inspected.video) return checkMediaOrder(order, finalUrl, Date.now() + 240_000, onStage);
+  if (inspected.video) return checkMediaOrder(order, finalUrl, mediaDeadline, onStage, claim);
   const hadText = Boolean(bits && bits.text.length >= 120);
   // A headline/caption or a blocked page is not the full article/video.
   if (!hadText) throw new CheckError("unreadable");
@@ -169,7 +175,7 @@ export async function checkOrder(order: { url: string; plan: Plan; lang: Lang },
         embed,
         transcript,
         video: inspected.video,
-      }), order.plan, deadline,
+      }), order.plan, startedAt + 120_000,
     );
     parsed = answer.parsed;
     extra = answer.sources;
@@ -195,7 +201,7 @@ export async function checkOrder(order: { url: string; plan: Plan; lang: Lang },
   return { contract, report };
 }
 
-function mediaPrompt(order: { url: string; lang: Lang }, media: PreparedMedia, transcripts: string[]) {
+function mediaPrompt(order: { url: string; lang: Lang }, media: MediaVerificationInput) {
   return [
     `Verify the factual claims in this public social post. Language: ${order.lang === "id" ? "Bahasa Indonesia" : "English"}.`,
     `Submitted URL: ${order.url}`,
@@ -208,27 +214,40 @@ function mediaPrompt(order: { url: string; lang: Lang }, media: PreparedMedia, t
     "Use web search for independent dated evidence. Publication date is not necessarily the event date. Verify the alleged action, number, person, replacement and causation separately. Do not infer a cause from correlation or invent a replacement person/number.",
     "Set content_review.all_items_read=false for illegible images or any missing/unusable context. Set all_core_claims_covered=false if you cannot cover every material assertion within the claim limit. Describe gaps in issues. Sampled frames never prove authenticity, identify deepfakes, or establish unseen moments. Do not claim the whole video is authentic.",
     `Caption (data):\n${media.caption || "(none)"}`,
-    ...transcripts,
+    ...media.transcripts,
     media.coverage.audio_tracks === 0 ? "No audio stream was present in the downloaded media. Evaluate visible claims; do not invent speech." : "Audio was extracted in full for the downloaded videos; transcription can mishear words/numbers. Cross-check important names and numbers against visuals and sources.",
   ].join("\n\n");
 }
 
-async function checkMediaOrder(order: { url: string; plan: Plan; lang: Lang }, url: string, deadline: number, onStage: (stage: CheckStage) => Promise<void>) {
+async function prepareVerificationInput(url: string, deadline: number, onStage: (stage: CheckStage) => Promise<void>): Promise<MediaVerificationInput> {
+  const { audio, ...media } = await prepareMedia(url, deadline, onStage);
+  const transcripts: string[] = [];
+  if (audio.length) await onStage("transcribing");
+  for (const track of audio) {
+    const text = await transcribeWithOpenAI({ mime: "audio/mpeg", bytes: track.bytes }, deadline);
+    media.coverage.transcribed_tracks++;
+    transcripts.push(`Full audio transcript for post item ${track.item} (data):\n${text || "(transcriber returned no speech; do not invent spoken claims)"}`);
+  }
+  return { ...media, transcripts };
+}
+
+async function checkMediaOrder(order: { url: string; plan: Plan; lang: Lang }, url: string, deadline: number, onStage: (stage: CheckStage) => Promise<void>, claim?: CheckClaim) {
   if (order.plan !== "advance") throw new CheckError("video_plan");
   try {
-    const media = await prepareMedia(url, deadline, onStage);
-    const transcripts: string[] = [];
-    if (media.audio.length) await onStage("transcribing");
-    for (const audio of media.audio) {
-      const text = await transcribeWithOpenAI({ mime: "audio/mpeg", bytes: audio.bytes }, deadline);
-      media.coverage.transcribed_tracks++;
-      transcripts.push(`Full audio transcript for post item ${audio.item} (data):\n${text || "(transcriber returned no speech; do not invent spoken claims)"}`);
-    }
+    const saved = claim ? await readMediaCheckpoint(claim, url) : null;
+    const media = saved ?? await prepareVerificationInput(url, deadline, onStage);
     await onStage("verifying");
+    if (saved) console.info("[realorna] media_verification_resumed");
     const contentType = media.coverage.videos > 0 ? "video" : "media";
-    const answer = await askOpenAI(mediaPrompt(order, media, transcripts), order.plan, deadline, {
+    const answer = await askOpenAI(mediaPrompt(order, media), order.plan, deadline, {
       type: contentType,
       images: media.images,
+    }).catch(async (error) => {
+      // An unsuccessful verification can reuse its completed input on the next claim.
+      if (claim && !saved) await saveMediaCheckpoint(claim, url, media).catch(() => {
+        console.warn("[realorna] media_checkpoint_save_failed");
+      });
+      throw error;
     });
     const contract = contractFromModel(answer.parsed, answer.sources, order.lang, { sourceUrl: url, contentRead: true });
     contract.coverage = media.coverage;
@@ -239,7 +258,7 @@ async function checkMediaOrder(order: { url: string; plan: Plan; lang: Lang }, u
 
 export async function fulfillClaimed(order: OrderRow) {
   try {
-    const out = await checkOrder(order, stage => updateProgress(order.order_id, order.claim_token, stage));
+    const out = await checkOrder(order, stage => updateProgress(order.order_id, order.claim_token, stage), order);
     await markProcessed(order.order_id, out.contract, out.report, order.claim_token);
     return out;
   } catch (err) {
