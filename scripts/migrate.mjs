@@ -28,6 +28,21 @@ if (!databaseUrl) {
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
 
+async function withMigrationLock(client, work) {
+  await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+  try {
+    // The pooler pins a connection only for the transaction. Use a separate
+    // lock key from the old session lock, which may linger on pooled connections.
+    await client.query("select pg_advisory_xact_lock(782041007, 1)");
+    const result = await work();
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  }
+}
+
 async function main() {
   let entries;
   try {
@@ -45,39 +60,37 @@ async function main() {
   const pool = new pg.Pool({ connectionString: databaseUrl, max: 1 });
   const client = await pool.connect();
   try {
-    // Serialize cold starts so two instances cannot apply the same file.
-    await client.query("select pg_advisory_lock(782041007)");
-    await client.query(
-      "CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())",
-    );
-    const applied = (await client.query("SELECT name FROM _migrations")).rows.map(
-      (r) => r.name,
-    );
+    const applied = await withMigrationLock(client, async () => {
+      await client.query(
+        "CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+      );
+      return (await client.query("SELECT name FROM _migrations")).rows.map((r) => r.name);
+    });
 
     let count = 0;
     for (const { name } of pendingMigrations(entries, applied)) {
       const text = await readFile(join(migrationsDir, name), "utf8");
       try {
-        await client.query("BEGIN");
-        // pg's simple-query protocol runs a whole multi-statement file at once.
-        await client.query(text);
-        await client.query("INSERT INTO _migrations (name) VALUES ($1)", [name]);
-        await client.query("COMMIT");
+        const ran = await withMigrationLock(client, async () => {
+          // Another instance may have committed this file since our first read.
+          const existing = await client.query("SELECT 1 FROM _migrations WHERE name = $1", [name]);
+          if (existing.rows.length) return false;
+          // pg's simple-query protocol runs a whole multi-statement file at once.
+          await client.query(text);
+          await client.query("INSERT INTO _migrations (name) VALUES ($1)", [name]);
+          return true;
+        });
+        if (ran) {
+          console.log(`[migrate] applied ${name}`);
+          count += 1;
+        }
       } catch (err) {
         console.error(`[migrate] error applying ${name}`);
-        try {
-          await client.query("ROLLBACK");
-        } catch {
-          // ROLLBACK fails when the connection died — keep the original error.
-        }
         throw err;
       }
-      console.log(`[migrate] applied ${name}`);
-      count += 1;
     }
     console.log(count ? `[migrate] done — ${count} migration(s) applied.` : "[migrate] up to date.");
   } finally {
-    try { await client.query("select pg_advisory_unlock(782041007)"); } catch {}
     client.release();
     await pool.end();
   }
